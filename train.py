@@ -51,12 +51,21 @@ dataset = load_dataset("Skylion007/openwebtext", split="train")
 
 # Tokenizer (using GPT-2 tokenizer for consistency with OpenWebText)
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
+tokenizer.pad_token = tokenizer.eos_token  # Set padding token to be the end of sequence token
 
 def tokenize_function(examples):
     return tokenizer(examples["text"], padding="max_length", truncation=True, max_length=args.seq_length)
 
-# Tokenize dataset
-tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
+# Tokenize dataset with caching
+cache_dir = os.path.join(run_dir, "cache")
+os.makedirs(cache_dir, exist_ok=True)
+tokenized_dataset = dataset.map(
+    tokenize_function,
+    batched=True,
+    remove_columns=["text"],
+    cache_file_name=os.path.join(cache_dir, "tokenized_dataset_cache.arrow"),
+    num_proc=os.cpu_count()  # Enable multiprocessing for faster tokenization
+)
 tokenized_dataset.set_format(type="torch", columns=["input_ids"])
 
 # DataLoader
