@@ -408,4 +408,6 @@ class MACTransformer(Transformer):
             # Here we assume the original segment corresponds to the last `seqlen` tokens of the augmented input.
             original_segment = h[:, -seqlen:, :]
             self.mac_module.update(original_segment)
+            # Slice the output to include only the original tokens.
+            output = output[:, -seqlen:, :]
         return output
