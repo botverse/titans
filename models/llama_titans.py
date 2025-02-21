@@ -358,34 +358,44 @@ class MACTransformer(Transformer):
         # Get initial embeddings for the current segment
         h = self.tok_embeddings(tokens)  # shape (batch, seq_len, dim)
         self.freqs_cis = self.freqs_cis.to(h.device)
+        # Extract rotary embeddings for the original segment
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
         if use_mac:
             # Retrieve long-term memory summary from current segment embeddings
             h_mem = self.mac_module.retrieve(h)  # shape (batch, dim)
-            # Expand retrieved memory to sequence dimension
             h_mem = h_mem.unsqueeze(1)  # shape (batch, 1, dim)
             # Expand persistent memory tokens to batch dimension
             p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(_bsz, -1, -1)  # (batch, num_persistent, dim)
             # Concatenate: persistent tokens, retrieved memory, then current segment embeddings
             h = torch.cat([p_mem, h_mem, h], dim=1)
-            # For simplicity, set mask to None (adjust as needed for proper attention masking)
+            # Create dummy (identity) rotary embeddings for the extra tokens:
+            # The extra tokens (prefix) count is the sum of persistent and retrieved memory tokens.
+            extra = p_mem.shape[1] + h_mem.shape[1]
+            extra_freqs = torch.ones((extra, freqs_cis.shape[-1]), dtype=freqs_cis.dtype, device=freqs_cis.device)
+            # Prepend them to the rotary embeddings for the original segment so that the new total 
+            # rotary embeddings tensor has shape (extra + seqlen, head_dim//2) matching h's sequence length.
+            freqs_cis = torch.cat([extra_freqs, freqs_cis], dim=0)
+            # Set new start position to 0 (the rotary offsets now align with the augmented input)
+            new_start_pos = 0
             mask = None
         else:
+            new_start_pos = start_pos
             mask = None
             if seqlen > 1:
                 mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
                 mask = torch.triu(mask, diagonal=1)
                 mask = torch.hstack([torch.zeros((seqlen, start_pos), device=tokens.device), mask]).type_as(h)
 
+        # Now, h has shape (batch, extra + seqlen, dim) and freqs_cis has shape (extra + seqlen, head_dim//2)
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask)
+            h = layer(h, new_start_pos, freqs_cis, mask)
         h = self.norm(h)
         output = self.output(h).float()
 
         if use_mac:
             # Update long-term memory using the original current segment embeddings.
-            # Here we assume the original segment corresponds to the last 'seqlen' tokens of the augmented input.
+            # Here we assume the original segment corresponds to the last seqlen tokens of the augmented input.
             original_segment = h[:, -seqlen:, :]
             self.mac_module.update(original_segment)
         return output
