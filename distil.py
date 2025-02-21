@@ -161,9 +161,16 @@ class DistillationTrainer:
             shuffle=(self.sampler is None),
             num_workers=4,
             pin_memory=True,
-            # Custom collate: join dialogue turns from each row into a single string.
-            # Each sample is a list of dicts; we join the "value" from each turn.
-            collate_fn=lambda batch: {"text": ["\n".join(turn["value"] for turn in sample) for sample in batch]}
+            # Custom collate function that handles different sample types:
+            # - If the sample is a list (of dialogue turns), join the "value" fields.
+            # - If the sample is a dict with a "text" key, use it directly.
+            # - Otherwise assume the sample is already a string.
+            collate_fn=lambda batch: {"text": [
+                "\n".join(turn["value"] for turn in sample) if isinstance(sample, list)
+                else sample["text"] if isinstance(sample, dict) and "text" in sample
+                else sample
+                for sample in batch
+            ]}
         )
         
         # Initialize optimizer
