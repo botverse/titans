@@ -70,7 +70,7 @@ class DistillationTrainer:
         teacher_model_id: str,
         log_dir: str = "runs/distillation",
         checkpoint_path: str = None,
-        batch_size: int = 8,
+        batch_size: int = 32,
         max_length: int = 512,
         temperature: float = 2.0,
         alpha: float = 0.5,
@@ -160,7 +160,9 @@ class DistillationTrainer:
             sampler=self.sampler,
             shuffle=(self.sampler is None),
             num_workers=4,
-            pin_memory=True
+            pin_memory=True,
+            # Custom collate to avoid stacking strings (which can be of variable length)
+            collate_fn=lambda batch: {"text": [sample["text"] for sample in batch]}
         )
         
         # Initialize optimizer
