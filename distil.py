@@ -1,3 +1,5 @@
+os.environ["HF_HOME"] = os.path.join(os.getcwd(), ".huggingface")
+
 import os
 import torch
 import torch.distributed as dist
@@ -95,7 +97,7 @@ class DistillationTrainer:
         self.max_length = max_length
         
         # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(teacher_model_id, use_auth_token=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(teacher_model_id, token=True)
         
         # Initialize teacher model
         if distributed:
@@ -107,7 +109,7 @@ class DistillationTrainer:
             teacher_model_id,
             torch_dtype=torch.bfloat16,
             device_map=device_map,
-            use_auth_token=True
+            token=True
         )
         self.teacher.eval()
         
