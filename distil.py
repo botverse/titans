@@ -68,7 +68,7 @@ class DistillationTrainer:
         teacher_model_id: str,
         log_dir: str = "runs/distillation",
         checkpoint_path: str = None,
-        batch_size: int = 32,
+        batch_size: int = 8,
         max_length: int = 512,
         temperature: float = 2.0,
         alpha: float = 0.5,
