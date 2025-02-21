@@ -9,7 +9,7 @@ import os
 import yaml
 from datetime import datetime
 
-from model import TitansModel  # Assuming TitansModel is defined in model.py
+from models.naive_model import TitansModel  # Assuming TitansModel is defined in model.py
 
 def setup_run():
     # Create runs directory if it doesn't exist
