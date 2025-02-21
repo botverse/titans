@@ -384,8 +384,9 @@ class MACTransformer(Transformer):
             freqs_cis = torch.cat([extra_freqs, freqs_cis], dim=0)
             # Set new start position to the number of extra tokens
             new_start_pos = extra
-            # Use the original sequence length as the number of new tokens
-            new_tokens_length = seqlen
+            # Limit new_tokens_length so that the augmented sequence length (extra + new_tokens_length)
+            # does not exceed the maximum sequence length (self.params.max_seq_len)
+            new_tokens_length = min(seqlen, self.params.max_seq_len - extra)
             mask = None
         else:
             new_start_pos = start_pos
