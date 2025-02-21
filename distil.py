@@ -165,7 +165,7 @@ class DistillationTrainer:
             # - If the sample is a list of dicts (each with a "value" key), join the "value" entries.
             # - If the sample is a list of strings, join them directly.
             # - If the sample is a dict with a "text" key, use that.
-            # - Otherwise assume the sample is already a string.
+            # - Otherwise convert the sample to string.
             collate_fn=lambda batch: {"text": [
                 "\n".join(turn["value"] for turn in sample)
                     if isinstance(sample, list) and len(sample) > 0 and isinstance(sample[0], dict)
@@ -173,7 +173,7 @@ class DistillationTrainer:
                     if isinstance(sample, list)
                 else sample["text"]
                     if isinstance(sample, dict) and "text" in sample
-                else sample
+                else str(sample)
                 for sample in batch
             ]}
         )
