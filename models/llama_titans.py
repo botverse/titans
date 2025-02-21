@@ -300,3 +300,92 @@ class Transformer(nn.Module):
         h = self.norm(h)
         output = self.output(h).float()
         return output
+
+# --- MAC Implementation ---
+# The following additions implement the Memory as a Context (MAC) variant.
+
+class MACModule(nn.Module):
+    """
+    Implements a simplified Memory as a Context (MAC) module.
+    It maintains a persistent memory (learnable tokens) and a long-term memory buffer.
+    Given the current segment, it retrieves a memory summary and concatenates:
+      [Persistent Memory || Retrieved Memory || Current Segment]
+    before passing it to the transformer.
+    """
+    def __init__(self, dim: int, num_persistent: int = 16, memory_size: int = 1024, alpha: float = 0.1):
+        super().__init__()
+        # Learned persistent tokens
+        self.persistent_memory = nn.Parameter(torch.randn(num_persistent, dim))
+        # Long-term memory buffer (initialized to zeros)
+        self.register_buffer("long_term_memory", torch.zeros(memory_size, dim))
+        self.alpha = alpha
+        self.memory_size = memory_size
+        # Query projection for memory retrieval
+        self.mac_query = nn.Linear(dim, dim)
+    
+    def retrieve(self, segment: torch.Tensor) -> torch.Tensor:
+        # segment: shape (batch, seq_len, dim)
+        # Compute a query vector by averaging over the segment and projecting
+        q = self.mac_query(segment.mean(dim=1))  # shape (batch, dim)
+        # Compute attention scores over the long-term memory
+        attn_scores = torch.matmul(q, self.long_term_memory.T)  # shape (batch, memory_size)
+        attn_weights = torch.softmax(attn_scores, dim=-1)  # shape (batch, memory_size)
+        # Retrieve a weighted sum from the long-term memory
+        h = torch.matmul(attn_weights, self.long_term_memory)  # shape (batch, dim)
+        return h
+    
+    def update(self, segment: torch.Tensor):
+        # Update long-term memory with new information from the current segment
+        # Here we use the segment's mean as new info; then update via EMA
+        new_info = segment.mean(dim=1)  # shape (batch, dim)
+        new_info = new_info.mean(dim=0, keepdim=True)  # shape (1, dim)
+        # Exponential moving average update over the entire memory buffer
+        self.long_term_memory = (1 - self.alpha) * self.long_term_memory + self.alpha * new_info.expand_as(self.long_term_memory)
+
+class MACTransformer(Transformer):
+    """
+    A wrapper around the base Transformer that implements Memory as a Context (MAC).
+    It retrieves long-term memory using a MACModule, concatenates it with persistent tokens and the current segment,
+    then processes the augmented input through the transformer layers. Finally, it updates the memory.
+    """
+    def __init__(self, params: ModelArgs, mac_module: MACModule):
+        super().__init__(params)
+        self.mac_module = mac_module
+
+    @torch.inference_mode()
+    def forward(self, tokens: torch.Tensor, start_pos: int, use_mac: bool = True):
+        _bsz, seqlen = tokens.shape
+        # Get initial embeddings for the current segment
+        h = self.tok_embeddings(tokens)  # shape (batch, seq_len, dim)
+        self.freqs_cis = self.freqs_cis.to(h.device)
+        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+
+        if use_mac:
+            # Retrieve long-term memory summary from current segment embeddings
+            h_mem = self.mac_module.retrieve(h)  # shape (batch, dim)
+            # Expand retrieved memory to sequence dimension
+            h_mem = h_mem.unsqueeze(1)  # shape (batch, 1, dim)
+            # Expand persistent memory tokens to batch dimension
+            p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(_bsz, -1, -1)  # (batch, num_persistent, dim)
+            # Concatenate: persistent tokens, retrieved memory, then current segment embeddings
+            h = torch.cat([p_mem, h_mem, h], dim=1)
+            # For simplicity, set mask to None (adjust as needed for proper attention masking)
+            mask = None
+        else:
+            mask = None
+            if seqlen > 1:
+                mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device)
+                mask = torch.triu(mask, diagonal=1)
+                mask = torch.hstack([torch.zeros((seqlen, start_pos), device=tokens.device), mask]).type_as(h)
+
+        for layer in self.layers:
+            h = layer(h, start_pos, freqs_cis, mask)
+        h = self.norm(h)
+        output = self.output(h).float()
+
+        if use_mac:
+            # Update long-term memory using the original current segment embeddings.
+            # Here we assume the original segment corresponds to the last 'seqlen' tokens of the augmented input.
+            original_segment = h[:, -seqlen:, :]
+            self.mac_module.update(original_segment)
+        return output

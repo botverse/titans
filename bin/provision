@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+export DEBIAN_FRONTEND=noninteractive
+sudo mkdir -p /etc/needrestart/conf.d
+echo '$nrconf{restart} = '\''a'\'';' | sudo tee /etc/needrestart/conf.d/99restart.conf
+
+# Install system dependencies
+sudo apt update
+sudo apt install -y \
+    make build-essential libssl-dev zlib1g-dev \
+    libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm \
+    libncurses5-dev libncursesw5-dev xz-utils tk-dev \
+    libffi-dev liblzma-dev python3-openssl libpq-dev git
+
+# Install pyenv
+curl https://pyenv.run | bash
+
+# Add pyenv to PATH and initialize for current session
+export PYENV_ROOT="$HOME/.pyenv"
+export PATH="$PYENV_ROOT/bin:$PATH"
+eval "$(pyenv init -)"
+
+# Install poetry
+curl -sSL https://install.python-poetry.org | python3 -
+export PATH="$HOME/.local/bin:$PATH"
+
+# Add environment settings to profile for future sessions
+cat << 'EOF' >> ~/.profile
+export PYENV_ROOT="$HOME/.pyenv"
+[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
+eval "$(pyenv init -)"
+export PATH="$HOME/.local/bin:$PATH"
+EOF
+
+# Install Python version and set up poetry
+pyenv install -s "$(cat .python-version)"
+
+# Debug poetry installation
+which poetry
+poetry --version
+
+# Configure poetry with error checking
+if ! poetry config virtualenvs.in-project true; then
+    echo "Failed to configure poetry virtualenvs"
+    exit 1
+fi
+
+if ! poetry env use "$(pyenv prefix "$(cat .python-version)")/bin/python"; then
+    echo "Failed to set poetry python version"
+    exit 1
+fi
+
+if ! poetry install --no-root; then
+    echo "Failed to install dependencies"
+    exit 1
+fi

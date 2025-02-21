@@ -1,0 +1,33 @@
+#!/bin/bash
+
+# Exit if no command is provided
+if [ $# -eq 0 ]; then
+    echo "Usage: notify <command> [arguments...]"
+    exit 1
+fi
+
+CMD_ARGS="$*"
+
+# Record start time
+START_TIME=$(date +%s)
+
+# Execute the command
+eval "$CMD_ARGS"
+
+# Get the exit status
+EXIT_STATUS=$?
+
+# Calculate elapsed time
+END_TIME=$(date +%s)
+ELAPSED=$((END_TIME - START_TIME))
+ELAPSED_STR=$(printf '%02d:%02d:%02d' $((ELAPSED/3600)) $((ELAPSED%3600/60)) $((ELAPSED%60)))
+
+# Send notification via Pushover
+curl -s \
+    --form-string "token=$PUSHOVER_APP_TOKEN" \
+    --form-string "user=$PUSHOVER_USER_TOKEN" \
+    --form-string "message=Finished: $CMD_ARGS (exit: $EXIT_STATUS) - Time: $ELAPSED_STR" \
+    https://api.pushover.net/1/messages.json
+
+# Preserve the original command's exit status
+exit $EXIT_STATUS
