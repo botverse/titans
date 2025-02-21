@@ -161,8 +161,9 @@ class DistillationTrainer:
             shuffle=(self.sampler is None),
             num_workers=4,
             pin_memory=True,
-            # Custom collate to avoid stacking strings (which can be of variable length)
-            collate_fn=lambda batch: {"text": [sample["text"] for sample in batch]}
+            # Custom collate: join dialogue turns from each row into a single string.
+            # Each sample is a list of dicts; we join the "value" from each turn.
+            collate_fn=lambda batch: {"text": ["\n".join(turn["value"] for turn in sample) for sample in batch]}
         )
         
         # Initialize optimizer
