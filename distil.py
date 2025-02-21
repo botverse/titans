@@ -98,6 +98,8 @@ class DistillationTrainer:
         
         # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(teacher_model_id, token=True)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Initialize teacher model
         if distributed:
