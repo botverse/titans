@@ -120,7 +120,7 @@ class DistillationTrainer:
                 n_layers=self.teacher.config.num_hidden_layers,
                 n_kv_heads=self.teacher.config.num_key_value_heads,
                 vocab_size=self.teacher.config.vocab_size,
-                max_seq_len=self.teacher.config.max_position_embeddings,
+                max_seq_len=self.max_length,
             ),
             mac_module=MACModule(
                 dim=self.teacher.config.hidden_size,
