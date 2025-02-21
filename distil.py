@@ -142,7 +142,7 @@ class DistillationTrainer:
             self.load_checkpoint(checkpoint_path)
         
         # Initialize dataset and dataloader
-        self.dataset = load_dataset("Open-Orca/SlimOrca", split="train")
+        self.dataset = load_dataset("Open-Orca/SlimOrca", split="train", cache_dir="./data")
         
         # Adjust batch size based on number of GPUs
         self.batch_size = batch_size // self.world_size if self.world_size > 0 else batch_size
