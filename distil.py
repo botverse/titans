@@ -1,6 +1,6 @@
+import os
 os.environ["HF_HOME"] = os.path.join(os.getcwd(), ".huggingface")
 
-import os
 import torch
 import torch.distributed as dist
 import torch.nn as nn
