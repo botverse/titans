@@ -183,6 +183,7 @@ class DistillationTrainer:
         
         # Initialize optimizer
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
+        self.scaler = torch.cuda.amp.GradScaler()  # Initialize automatic mixed precision scaler
 
     def prepare_batch(self, batch):
         """Tokenize and prepare batch for training"""
@@ -233,16 +234,17 @@ class DistillationTrainer:
                 inputs = self.prepare_batch(batch)
                 
                 # Get teacher predictions
-                with torch.no_grad():
+                with torch.amp.autocast("cuda"):
                     teacher_outputs = self.teacher(**inputs)
                     teacher_logits = teacher_outputs.logits
                 
                 # Get student predictions
-                student_outputs = self.student(
-                    tokens=inputs["input_ids"],
-                    start_pos=0,
-                    use_mac=True
-                )
+                with torch.amp.autocast("cuda"):
+                    student_outputs = self.student(
+                        tokens=inputs["input_ids"],
+                        start_pos=0,
+                        use_mac=True
+                    )
                 
                 # Compute loss
                 loss, distil_loss, task_loss = self.compute_loss(
@@ -251,9 +253,11 @@ class DistillationTrainer:
                     inputs["input_ids"]
                 )
                 
-                # Backward pass and optimization
-                loss.backward()
-                self.optimizer.step()
+                # Scale loss and backward pass with AMP
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
                 
                 # Update running averages
                 total_loss += loss.item()
