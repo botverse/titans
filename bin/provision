@@ -13,11 +13,12 @@ sudo apt install -y \
     libffi-dev liblzma-dev python3-openssl libpq-dev git
 
 # Install pyenv
+export PYENV_ROOT="$HOME/.pyenv"
+export PATH="$PYENV_ROOT/bin:$PATH"
+
 curl https://pyenv.run | bash
 
 # Add pyenv to PATH and initialize for current session
-export PYENV_ROOT="$HOME/.pyenv"
-export PATH="$PYENV_ROOT/bin:$PATH"
 eval "$(pyenv init -)"
 
 # Install poetry

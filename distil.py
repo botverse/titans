@@ -1,7 +1,7 @@
-import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["HF_HOME"] = os.path.join(os.getcwd(), ".huggingface")
+import dotenv
+dotenv.load_dotenv()
 
+import os
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -98,7 +98,7 @@ class DistillationTrainer:
         self.max_length = max_length
         
         # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(teacher_model_id, token=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(teacher_model_id, token=os.getenv("HF_TOKEN"))
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
@@ -112,7 +112,7 @@ class DistillationTrainer:
             teacher_model_id,
             torch_dtype=torch.bfloat16,
             device_map=device_map,
-            use_auth_token=True
+            token=os.getenv("HF_TOKEN")
         )
         self.teacher.eval()
         

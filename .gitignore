@@ -4,3 +4,5 @@ runs
 .specstory
 .lambda/
 data/
+.env
+.huggingface
