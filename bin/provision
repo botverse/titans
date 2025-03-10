@@ -36,6 +36,12 @@ EOF
 # Install Python version and set up poetry
 pyenv install -s "$(cat .python-version)"
 
+# Activate pyenv Python version
+pyenv global "$(cat .python-version)"
+
+# Install PyTorch with CUDA and NCCL support
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
 # Debug poetry installation
 which poetry
 poetry --version

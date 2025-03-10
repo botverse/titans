@@ -47,7 +47,7 @@ run_dir = setup_run()
 model_save_path = os.path.join(run_dir, "model.pth")
 
 # Load OpenWebText dataset
-dataset = load_dataset("Skylion007/openwebtext", split="train")
+dataset = load_dataset("Skylion007/openwebtext", split="train", cache_dir=os.getenv("HF_DATASETS_CACHE"))
 
 # Tokenizer (using GPT-2 tokenizer for consistency with OpenWebText)
 tokenizer = AutoTokenizer.from_pretrained("gpt2")
