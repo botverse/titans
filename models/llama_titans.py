@@ -359,7 +359,6 @@ class MACTransformer(Transformer):
         super().__init__(params)
         self.mac_module = mac_module
 
-    @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int, use_mac: bool = True):
         _bsz, seqlen = tokens.shape
         # Get initial embeddings for the current segment
