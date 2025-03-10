@@ -210,7 +210,7 @@ class DistillationTrainer:
         )
         
         # Task loss (cross entropy)
-        task_loss = F.cross_entropy(student_logits.view(-1, student_logits.size(-1)), labels.view(-1))
+        task_loss = F.cross_entropy(student_logits.reshape(-1, student_logits.size(-1)), labels.reshape(-1))
         
         # Combined loss
         loss = (self.alpha * distil_loss) + ((1 - self.alpha) * task_loss)
