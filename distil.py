@@ -114,6 +114,7 @@ class DistillationTrainer:
             device_map=device_map,
             token=os.getenv("HF_TOKEN")
         )
+        self.teacher.gradient_checkpointing_enable()
         self.teacher.eval()
         
         # Initialize student model
@@ -183,7 +184,7 @@ class DistillationTrainer:
         
         # Initialize optimizer
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
-        self.scaler = torch.cuda.amp.GradScaler('cuda')  # Initialize automatic mixed precision scaler
+        self.scaler = torch.amp.GradScaler(device_type='cuda')
 
     def prepare_batch(self, batch):
         """Tokenize and prepare batch for training"""
@@ -336,8 +337,8 @@ def main():
             teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
             log_dir=str(log_dir),
             checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
-            batch_size=32,
-            max_length=512,
+            batch_size=8,
+            max_length=256,
             temperature=2.0,
             alpha=0.5,
             distributed=distributed
