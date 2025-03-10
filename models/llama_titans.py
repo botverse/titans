@@ -342,12 +342,10 @@ class MACModule(nn.Module):
         return h
     
     def update(self, segment: torch.Tensor):
-        # Update long-term memory with new information from the current segment
-        # Here we use the segment's mean as new info; then update via EMA
-        new_info = segment.mean(dim=1)  # shape (batch, dim)
-        new_info = new_info.mean(dim=0, keepdim=True)  # shape (1, dim)
-        # Exponential moving average update over the entire memory buffer
-        self.long_term_memory = (1 - self.alpha) * self.long_term_memory + self.alpha * new_info.expand_as(self.long_term_memory)
+        with torch.no_grad():
+            new_info = segment.mean(dim=1)  # shape (batch, dim)
+            new_info = new_info.mean(dim=0, keepdim=True)  # shape (1, dim)
+            self.long_term_memory = (1 - self.alpha) * self.long_term_memory + self.alpha * new_info.expand_as(self.long_term_memory)
 
 class MACTransformer(Transformer):
     """
