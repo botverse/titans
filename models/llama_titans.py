@@ -160,9 +160,20 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
-        # Create fresh caches at each forward pass (training mode)
-        keys = xk
-        values = xv
+        if self.training:
+            # Training mode: use fresh keys and values without caching
+            keys = xk
+            values = xv
+        else:
+            # Inference mode: use and update persistent caches
+            self.cache_k = self.cache_k.to(xk.device)
+            self.cache_v = self.cache_v.to(xv.device)
+
+            self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+            self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)

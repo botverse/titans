@@ -292,21 +292,21 @@ class DistillationTrainer:
         """Load checkpoint and resume training state"""
         if self.is_main_process:
             print(f"Loading checkpoint from {checkpoint_path}")
-            
+
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
+
         # Load model state
         if self.distributed:
             self.student.module.load_state_dict(checkpoint['student_state_dict'])
         else:
             self.student.load_state_dict(checkpoint['student_state_dict'])
-        
+
         # Load optimizer state
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
+
         # Set starting epoch
         self.start_epoch = checkpoint['epoch'] + 1
-        
+
         if self.is_main_process:
             print(f"Resuming from epoch {self.start_epoch}")
             print(f"Previous loss: {checkpoint['loss']}")
@@ -315,22 +315,22 @@ def main():
     try:
         # Initialize distributed training if applicable
         distributed = setup_distributed()
-        
+
         # Create checkpoint and log directories
         log_dir = Path("runs/distillation")
         checkpoint_dir = Path("checkpoints")
-        
+
         if (distributed and int(os.environ['LOCAL_RANK']) == 0) or (not distributed):
             log_dir.mkdir(parents=True, exist_ok=True)
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Check for latest checkpoint
         latest_checkpoint = None
         if checkpoint_dir.exists():
             checkpoints = list(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
             if checkpoints:
                 latest_checkpoint = max(checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
-        
+
         trainer = DistillationTrainer(
             teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
             log_dir=str(log_dir),
@@ -341,31 +341,29 @@ def main():
             alpha=0.5,
             distributed=distributed
         )
-        
+
         num_epochs = 10
         for epoch in range(trainer.start_epoch, num_epochs):
             loss = trainer.train_epoch(epoch)
-            
+
             if trainer.is_main_process:
                 print(f"Epoch {epoch} average loss: {loss}")
-                
-                # Save checkpoint
-                if (epoch + 1) % 5 == 0:
-                    state_dict = trainer.student.module.state_dict() if distributed else trainer.student.state_dict()
-                    checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
-                    torch.save({
-                        'epoch': epoch,
-                        'student_state_dict': state_dict,
-                        'optimizer_state_dict': trainer.optimizer.state_dict(),
-                        'loss': loss,
-                    }, checkpoint_path)
-        
+
+                # Save checkpoint after every epoch
+                state_dict = trainer.student.module.state_dict() if distributed else trainer.student.state_dict()
+                checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
+                torch.save({
+                    'epoch': epoch,
+                    'student_state_dict': state_dict,
+                    'optimizer_state_dict': trainer.optimizer.state_dict(),
+                    'loss': loss,
+                }, checkpoint_path)
+
         # Close tensorboard writer
         if trainer.is_main_process and trainer.writer is not None:
             trainer.writer.close()
-    
+
     finally:
         cleanup()
-
 if __name__ == "__main__":
     main()
