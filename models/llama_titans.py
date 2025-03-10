@@ -331,20 +331,17 @@ class MACModule(nn.Module):
         self.mac_query = nn.Linear(dim, dim)
     
     def retrieve(self, segment: torch.Tensor) -> torch.Tensor:
-        # segment: shape (batch, seq_len, dim)
-        # Compute a query vector by averaging over the segment and projecting
-        q = self.mac_query(segment.mean(dim=1))  # shape (batch, dim)
-        # Compute attention scores over the long-term memory
-        attn_scores = torch.matmul(q, self.long_term_memory.T)  # shape (batch, memory_size)
-        attn_weights = torch.softmax(attn_scores, dim=-1)  # shape (batch, memory_size)
-        # Retrieve a weighted sum from the long-term memory
-        h = torch.matmul(attn_weights, self.long_term_memory)  # shape (batch, dim)
+        with torch.no_grad():
+            q = self.mac_query(segment.mean(dim=1))
+            attn_scores = torch.matmul(q, self.long_term_memory.T)
+            attn_weights = torch.softmax(attn_scores, dim=-1)
+            h = torch.matmul(attn_weights, self.long_term_memory)
         return h
     
     def update(self, segment: torch.Tensor):
         with torch.no_grad():
-            new_info = segment.mean(dim=1)  # shape (batch, dim)
-            new_info = new_info.mean(dim=0, keepdim=True)  # shape (1, dim)
+            new_info = segment.mean(dim=1)
+            new_info = new_info.mean(dim=0, keepdim=True)
             self.long_term_memory = (1 - self.alpha) * self.long_term_memory + self.alpha * new_info.expand_as(self.long_term_memory)
 
 class MACTransformer(Transformer):
