@@ -184,7 +184,7 @@ class DistillationTrainer:
         
         # Initialize optimizer
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
-        self.scaler = torch.amp.GradScaler(device_type='cuda')
+        self.scaler = torch.amp.GradScaler()
 
     def prepare_batch(self, batch):
         """Tokenize and prepare batch for training"""
