@@ -231,15 +231,14 @@ class DistillationTrainer:
             for batch in pbar:
                 self.optimizer.zero_grad()
                 
-                # Prepare input batch
                 inputs = self.prepare_batch(batch)
                 
-                # Get teacher predictions
-                with torch.amp.autocast("cuda"):
+                # Teacher forward pass (no gradients needed)
+                with torch.no_grad(), torch.amp.autocast("cuda"):
                     teacher_outputs = self.teacher(**inputs)
                     teacher_logits = teacher_outputs.logits
                 
-                # Get student predictions
+                # Student forward pass and backward pass (must be in same AMP context)
                 with torch.amp.autocast("cuda"):
                     student_outputs = self.student(
                         tokens=inputs["input_ids"],
@@ -247,14 +246,13 @@ class DistillationTrainer:
                         use_mac=True
                     )
                 
-                # Compute loss
-                loss, distil_loss, task_loss = self.compute_loss(
-                    teacher_logits,
-                    student_outputs,
-                    inputs["input_ids"]
-                )
+                    loss, distil_loss, task_loss = self.compute_loss(
+                        teacher_logits,
+                        student_outputs,
+                        inputs["input_ids"]
+                    )
                 
-                # Scale loss and backward pass with AMP
+                # Backward pass must be immediately after forward pass within AMP context
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
