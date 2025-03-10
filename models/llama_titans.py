@@ -402,9 +402,7 @@ class MACTransformer(Transformer):
 
         if use_mac:
             # Update long-term memory using the original current segment embeddings.
-            # Here we assume the original segment corresponds to the last `seqlen` tokens of the augmented input.
-            original_segment = h[:, -seqlen:, :]
+            original_segment = h[:, -seqlen:, :].detach()
             self.mac_module.update(original_segment)
-            # Slice the output to include only the original tokens.
             output = output[:, -seqlen:, :]
         return output
