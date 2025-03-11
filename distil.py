@@ -642,7 +642,7 @@ def main():
         if trainer.is_main_process and trainer.writer is not None:
             trainer.writer.close()
     finally:
-        if trainer.is_main_process:
+        if trainer is not None and trainer.is_main_process:
             wandb.finish()
         cleanup()
 
