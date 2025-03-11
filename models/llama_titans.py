@@ -50,16 +50,48 @@ class RMSNorm(torch.nn.Module):
         # Add epsilon before sqrt for numerical stability
         return x * torch.rsqrt(variance + self.eps)
 
-    def forward(self, x):
-        # Check for NaNs in input
-        if torch.isnan(x).any():
-            print("[WARNING] NaNs detected in RMSNorm input")
-            # Replace NaNs with zeros to prevent propagation
-            x = torch.nan_to_num(x, nan=0.0)
-            
-        # Ensure we use higher precision for normalization
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+    def forward(self, x: torch.Tensor, start_pos: int, freqs_cis: torch.Tensor, mask: Optional[torch.Tensor], new_tokens_length=None):
+        bsz, seqlen, _ = x.shape
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+
+        # Repeat KV heads if necessary
+        xk = repeat_kv(xk, self.n_rep)
+        xv = repeat_kv(xv, self.n_rep)
+
+        # Transpose for attention computation
+        xq = xq.transpose(1, 2)
+        xk = xk.transpose(1, 2)
+        xv = xv.transpose(1, 2)
+
+        # Limit attention to new tokens if specified
+        if new_tokens_length is not None:
+            xq = xq[:, :, -new_tokens_length:]
+
+        # Calculate attention scores and apply mask
+        scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+        
+        # Simple and memory-efficient safety clamp
+        scores = torch.clamp(scores, min=-20.0, max=20.0)
+        
+        # Apply mask if provided
+        if mask is not None:
+            scores = scores + mask
+        
+        # Apply softmax (using float for stability)
+        scores = F.softmax(scores.float(), dim=-1).type_as(x)
+        
+        # Apply attention
+        output = torch.matmul(scores, xv)
+        
+        # Reshape output
+        output = output.transpose(1, 2).contiguous().view(bsz, -1, self.n_local_heads * self.head_dim)
+        return self.wo(output)
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -416,30 +448,27 @@ class MACTransformer(Transformer):
         self.mac_module = mac_module
 
     def forward(self, tokens: torch.Tensor, start_pos: int, use_mac: bool = True):
-        """Forward pass with better NaN debugging"""
+        """Forward pass with targeted debugging"""
         _bsz, seqlen = tokens.shape
-        print(f"[DEBUG] Input tokens shape: {tokens.shape}, any NaN: {torch.isnan(tokens).any()}")
         
         # Get initial embeddings for the current segment
-        h = self.tok_embeddings(tokens)  # shape (batch, seq_len, dim) # (B, T, C)
-        print(f"[DEBUG] Initial embeddings shape: {h.shape}, any NaN: {torch.isnan(h).any()}")
+        h = self.tok_embeddings(tokens)  # (B, T, C)
         
         self.freqs_cis = self.freqs_cis.to(h.device)
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
         if use_mac:
             # Retrieve long-term memory summary from current segment embeddings
-            h_mem = self.mac_module.retrieve(h)  # shape (batch, dim) # (B, C)
-            h_mem = h_mem.unsqueeze(1)  # shape (batch, 1, dim) # (B, 1, C)
+            h_mem = self.mac_module.retrieve(h)  # (B, C)
+            h_mem = h_mem.unsqueeze(1)  # (B, 1, C)
             
             # Expand persistent memory tokens to batch dimension
             p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(_bsz, -1, -1)  # (B, num_persistent, C)
             
             # Concatenate: persistent tokens, retrieved memory, then current segment embeddings
             h = torch.cat([p_mem, h_mem, h], dim=1)  # (B, num_persistent + 1 + T, C)
-            print(f"[DEBUG] After MAC concatenation: {h.shape}, any NaN: {torch.isnan(h).any()}")
             
-            # The extra tokens (prefix) count is the sum of persistent and retrieved memory tokens.
+            # The extra tokens (prefix) count
             extra = p_mem.shape[1] + h_mem.shape[1]
             extra_freqs = torch.ones((extra, freqs_cis.shape[-1]), dtype=freqs_cis.dtype, device=freqs_cis.device)
             
@@ -460,40 +489,18 @@ class MACTransformer(Transformer):
                 mask = torch.triu(mask, diagonal=1)
                 mask = torch.hstack([torch.zeros((seqlen, start_pos), device=tokens.device), mask]).type_as(h)
 
-        # Now, run through each transformer layer with NaN checking
+        # Run through each transformer layer without excessive checks
         for i, layer in enumerate(self.layers):
-            h_before = h.clone()
             h = layer(h, new_start_pos, freqs_cis, mask, new_tokens_length=new_tokens_length)
-            
-            # Check if this layer introduced NaNs
-            if torch.isnan(h).any() and not torch.isnan(h_before).any():
-                print(f"[CRITICAL] Layer {i} introduced NaNs!")
-                
-                # Check the core components of this problematic layer
-                if hasattr(layer, 'attention'):
-                    print(f"[DEBUG] Layer {i} attention: W_q has NaNs: {torch.isnan(layer.attention.wq.weight).any()}")
-                    print(f"[DEBUG] Layer {i} attention: W_k has NaNs: {torch.isnan(layer.attention.wk.weight).any()}")
-                    print(f"[DEBUG] Layer {i} attention: W_v has NaNs: {torch.isnan(layer.attention.wv.weight).any()}")
-                    print(f"[DEBUG] Layer {i} attention: W_o has NaNs: {torch.isnan(layer.attention.wo.weight).any()}")
-                
-                if hasattr(layer, 'feed_forward'):
-                    ffn = layer.feed_forward
-                    if hasattr(ffn, 'w1') and ffn.w1 is not None:
-                        print(f"[DEBUG] Layer {i} ffn: W_1 has NaNs: {torch.isnan(ffn.w1.weight).any()}")
-                    if hasattr(ffn, 'w2') and ffn.w2 is not None:
-                        print(f"[DEBUG] Layer {i} ffn: W_2 has NaNs: {torch.isnan(ffn.w2.weight).any()}")
-                    if hasattr(ffn, 'w3') and ffn.w3 is not None:
-                        print(f"[DEBUG] Layer {i} ffn: W_3 has NaNs: {torch.isnan(ffn.w3.weight).any()}")
-            
-        h = self.norm(h)
-        print(f"[DEBUG] After final norm: {h.shape}, any NaN: {torch.isnan(h).any()}")
         
+        h = self.norm(h)
         output = self.output(h).float()
-        print(f"[DEBUG] Final output: {output.shape}, any NaN: {torch.isnan(output).any()}")
 
         if use_mac:
             # Update long-term memory using the original current segment embeddings
             original_segment = h[:, -seqlen:, :].detach()
-            self.mac_module.update(original_segment)
+            # Only check for NaNs here since this is a critical point
+            if not torch.isnan(original_segment).any():
+                self.mac_module.update(original_segment)
             output = output[:, -seqlen:, :]
         return output

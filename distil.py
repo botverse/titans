@@ -196,8 +196,8 @@ class DistillationTrainer:
             )
 
     def initialize_student(self):
-        """Initialize student model with better stability"""
-        # Initialize from student config
+        """Initialize student model with same parameters as teacher but with better numerical stability"""
+        # Use the same architecture size as before
         student_params = ModelArgs(
             dim=4096,
             n_layers=32,
@@ -211,41 +211,31 @@ class DistillationTrainer:
             max_seq_len=2048,
         )
         
-        # Initialize MAC module with careful initialization
-        # Using only the known parameters from the error messages
+        # Initialize MAC module with minimal logging
         mac_module = MACModule(
             dim=student_params.dim,
             num_persistent=16,
             alpha=0.1
         )
         
-        # Print MAC module parameters for debugging
-        print(f"[DEBUG] Persistent memory shape: {mac_module.persistent_memory.shape}")
-        print(f"[DEBUG] Long-term memory shape: {mac_module.long_term_memory.shape}")
-        print(f"[DEBUG] MAC query layer: {mac_module.mac_query}")
-        
         # Initialize the student model
         self.student = MACTransformer(student_params, mac_module).to(self.device)
         
-        # Add careful weight initialization for each layer
-        print("[INFO] Initializing student model weights...")
+        # Enable gradient checkpointing to save memory
+        self.student.gradient_checkpointing_enable()
+        
+        # Careful initialization without excessive printouts or checks
         with torch.no_grad():
             for name, param in self.student.named_parameters():
-                # Skip embeddings, as they require special handling
-                if 'norm' in name:
-                    if 'weight' in name:
-                        # RMSNorm weights should be initialized to ones
-                        param.copy_(torch.ones_like(param))
-                    continue
-                    
-                if param.dim() >= 2:
-                    # Use a more stable initialization for weight matrices 
-                    nn.init.xavier_normal_(param, gain=0.01)  # Small gain for stability
-                else:
-                    # For bias terms, initialize to zero
-                    nn.init.zeros_(param)
-        
-        print("[INFO] Student model initialized")
+                if 'norm' in name and 'weight' in name:
+                    param.copy_(torch.ones_like(param))
+                elif param.dim() >= 2:
+                    # Use a memory-efficient initialization
+                    nn.init.xavier_normal_(param, gain=0.01)
+            
+        # Done initialization
+        if self.is_main_process:
+            print("[INFO] Student model initialized")
 
     def prepare_batch(self, batch):
         """Tokenize and prepare batch for training"""
