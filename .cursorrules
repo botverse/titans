@@ -1,0 +1,4 @@
+
+add tensor shapes when possible, as a comment at the end of the line, 
+use the short form (B, T, C) when the dimmensions are commonly known, use the larger form (num_persistent)
+when it's a more obscure name
