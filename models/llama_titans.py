@@ -174,14 +174,6 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        if start_pos == 0:
-            # For the first position calculation, ensure the data is not corrupted
-            if torch.isnan(xq).any() or torch.isnan(xk).any() or torch.isnan(xv).any():
-                print("[WARNING] NaNs detected in QKV projections before RoPE")
-                xq = torch.nan_to_num(xq, nan=0.0)
-                xk = torch.nan_to_num(xk, nan=0.0)
-                xv = torch.nan_to_num(xv, nan=0.0)
-
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # Repeat KV heads if necessary
@@ -222,7 +214,7 @@ class Attention(nn.Module):
         
         output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
         
-        # Rest of code remains the same
+        # Reshape output
         output = output.transpose(1, 2).contiguous().view(bsz, -1, self.n_local_heads * self.head_dim)
         return self.wo(output)
 

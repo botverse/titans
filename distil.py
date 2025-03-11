@@ -215,9 +215,8 @@ class DistillationTrainer:
         mac_module = MACModule(
             dim=student_params.dim,
             num_persistent=16,
-            lt_size=1024,
+            num_memories=1024,
             alpha=0.1,
-            init_scale=0.01  # Use small scale for initialization
         )
         
         # Print MAC module parameters for debugging
