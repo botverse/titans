@@ -67,6 +67,13 @@ def cleanup():
     if dist.is_initialized():
         dist.destroy_process_group()
 
+# Log where the NaNs first appear
+def debug_nans(tensor, name):
+    tensor_np = tensor.detach().cpu().numpy()
+    wandb.log({f"nan_check/{name}": np.isnan(tensor_np).any()})
+    if np.isnan(tensor_np).any():
+        wandb.log({f"nan_check/{name}_percentage": np.isnan(tensor_np).mean() * 100})
+
 class DistillationTrainer:
     def __init__(
         self,
@@ -227,7 +234,11 @@ class DistillationTrainer:
         
         # Task loss (cross entropy)
         task_loss = F.cross_entropy(student_logits.reshape(-1, student_logits.size(-1)), labels.reshape(-1))
-        
+        # Inside compute_loss after calculating distil_loss and task_loss
+        if self.is_main_process:
+            debug_nans(distil_loss, "distil_loss")
+            debug_nans(task_loss, "task_loss")
+            
         # Combined loss
         loss = (self.alpha * distil_loss) + ((1 - self.alpha) * task_loss)
         return loss, distil_loss, task_loss
@@ -249,7 +260,23 @@ class DistillationTrainer:
             mac_module = self.student.module.mac_module
         else:
             mac_module = self.student.mac_module
+        # Check initial memory state
+        p_mem = mac_module.persistent_memory.cpu().detach().numpy()
+        l_mem = mac_module.long_term_memory.cpu().detach().numpy()
         
+        # Log detailed memory statistics
+        wandb.log({
+            "initial/persistent_memory_min": float(np.min(p_mem)),
+            "initial/persistent_memory_max": float(np.max(p_mem)),
+            "initial/persistent_memory_mean": float(np.mean(p_mem)),
+            "initial/persistent_memory_std": float(np.std(p_mem)),
+            "initial/long_term_memory_min": float(np.min(l_mem)),
+            "initial/long_term_memory_max": float(np.max(l_mem)),
+            "initial/long_term_memory_mean": float(np.mean(l_mem)),
+            "initial/long_term_memory_std": float(np.std(l_mem)),
+        })
+        
+
         previous_memory_state = mac_module.long_term_memory.clone().detach()
         
         with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
@@ -259,18 +286,18 @@ class DistillationTrainer:
                 inputs = self.prepare_batch(batch)
                 
                 # Teacher forward pass (no gradients needed)
-                with torch.no_grad(), torch.cuda.amp.autocast():
+                with torch.no_grad(), torch.amp.autocast("cuda"):
                     teacher_outputs = self.teacher(**inputs)
                     teacher_logits = teacher_outputs.logits
                 
                 # Student forward pass and backward pass (must be in same AMP context)
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast("cuda"):
                     student_outputs = self.student(
                         tokens=inputs["input_ids"],
                         start_pos=0,
                         use_mac=True
                     )
-                
+
                     loss, distil_loss, task_loss = self.compute_loss(
                         teacher_logits,
                         student_outputs,
@@ -426,14 +453,14 @@ def main():
             distributed=distributed
         )
 
-        num_epochs = 10
+        num_epochs = 1  # <-- set epochs to 1 for quick testing
         for epoch in range(trainer.start_epoch, num_epochs):
             loss = trainer.train_epoch(epoch)
 
             if trainer.is_main_process:
                 print(f"Epoch {epoch} average loss: {loss}")
 
-                # Save checkpoint after every epoch
+                # Save checkpoint after the epoch
                 state_dict = trainer.student.module.state_dict() if distributed else trainer.student.state_dict()
                 checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
                 torch.save({
