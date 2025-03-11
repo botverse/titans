@@ -329,9 +329,18 @@ class MACModule(nn.Module):
     def retrieve(self, segment: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             q = self.mac_query(segment.mean(dim=1))
+            print(f"[DEBUG] MAC query shape: {q.shape}, any NaN: {torch.isnan(q).any()}")
+            print(f"[DEBUG] segment.mean range: {segment.mean(dim=1).min().item()} to {segment.mean(dim=1).max().item()}")
+            
             attn_scores = torch.matmul(q, self.long_term_memory.T)
+            print(f"[DEBUG] Attn scores shape: {attn_scores.shape}, any NaN: {torch.isnan(attn_scores).any()}")
+            print(f"[DEBUG] Attn scores range: {attn_scores.min().item()} to {attn_scores.max().item()}")
+            
             attn_weights = torch.softmax(attn_scores, dim=-1)
+            print(f"[DEBUG] Attn weights shape: {attn_weights.shape}, any NaN: {torch.isnan(attn_weights).any()}")
+            
             h = torch.matmul(attn_weights, self.long_term_memory)
+            print(f"[DEBUG] Retrieved memory shape: {h.shape}, any NaN: {torch.isnan(h).any()}")
         return h
     
     def update(self, segment: torch.Tensor):
@@ -352,10 +361,13 @@ class MACTransformer(Transformer):
 
     def forward(self, tokens: torch.Tensor, start_pos: int, use_mac: bool = True):
         _bsz, seqlen = tokens.shape
+        print(f"[DEBUG] Input tokens shape: {tokens.shape}, any NaN: {torch.isnan(tokens).any()}")
+        
         # Get initial embeddings for the current segment
         h = self.tok_embeddings(tokens)  # shape (batch, seq_len, dim)
+        print(f"[DEBUG] Initial embeddings shape: {h.shape}, any NaN: {torch.isnan(h).any()}")
+        
         self.freqs_cis = self.freqs_cis.to(h.device)
-        # Extract rotary embeddings for the original segment
         freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
 
         if use_mac:

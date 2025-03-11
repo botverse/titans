@@ -319,9 +319,11 @@ class DistillationTrainer:
                     inputs = self.prepare_batch(batch)
                     
                     # Teacher forward pass (no gradients needed)
-                    with torch.no_grad(), torch.amp.autocast("cuda"):
+                    with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
                         teacher_outputs = self.teacher(**inputs)
                         teacher_logits = teacher_outputs.logits
+                        print(f"[DEBUG] Teacher logits shape: {teacher_logits.shape}, any NaN: {torch.isnan(teacher_logits).any()}")
+                        print(f"[DEBUG] Teacher logits range: {teacher_logits.min().item()} to {teacher_logits.max().item()}")
                     
                     # Student forward pass and backward pass (must be in same AMP context)
                     with torch.amp.autocast("cuda"):
