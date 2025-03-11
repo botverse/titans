@@ -386,11 +386,12 @@ class MACTransformer(Transformer):
         self.mac_module = mac_module
 
     def forward(self, tokens: torch.Tensor, start_pos: int, use_mac: bool = True):
+        """Forward pass with better NaN debugging"""
         _bsz, seqlen = tokens.shape
         print(f"[DEBUG] Input tokens shape: {tokens.shape}, any NaN: {torch.isnan(tokens).any()}")
         
         # Get initial embeddings for the current segment
-        h = self.tok_embeddings(tokens)  # shape (batch, seq_len, dim)
+        h = self.tok_embeddings(tokens)  # shape (batch, seq_len, dim) # (B, T, C)
         print(f"[DEBUG] Initial embeddings shape: {h.shape}, any NaN: {torch.isnan(h).any()}")
         
         self.freqs_cis = self.freqs_cis.to(h.device)
@@ -398,22 +399,26 @@ class MACTransformer(Transformer):
 
         if use_mac:
             # Retrieve long-term memory summary from current segment embeddings
-            h_mem = self.mac_module.retrieve(h)  # shape (batch, dim)
-            h_mem = h_mem.unsqueeze(1)  # shape (batch, 1, dim)
+            h_mem = self.mac_module.retrieve(h)  # shape (batch, dim) # (B, C)
+            h_mem = h_mem.unsqueeze(1)  # shape (batch, 1, dim) # (B, 1, C)
+            
             # Expand persistent memory tokens to batch dimension
-            p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(_bsz, -1, -1)  # (batch, num_persistent, dim)
+            p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(_bsz, -1, -1)  # (B, num_persistent, C)
+            
             # Concatenate: persistent tokens, retrieved memory, then current segment embeddings
-            h = torch.cat([p_mem, h_mem, h], dim=1)
+            h = torch.cat([p_mem, h_mem, h], dim=1)  # (B, num_persistent + 1 + T, C)
+            print(f"[DEBUG] After MAC concatenation: {h.shape}, any NaN: {torch.isnan(h).any()}")
+            
             # The extra tokens (prefix) count is the sum of persistent and retrieved memory tokens.
             extra = p_mem.shape[1] + h_mem.shape[1]
             extra_freqs = torch.ones((extra, freqs_cis.shape[-1]), dtype=freqs_cis.dtype, device=freqs_cis.device)
-            # Prepend dummy rotary embeddings for the extra tokens so that the total rotary embeddings
-            # tensor has shape (extra + seqlen, head_dim//2)
+            
+            # Prepend dummy rotary embeddings for the extra tokens
             freqs_cis = torch.cat([extra_freqs, freqs_cis], dim=0)
+            
             # Set new start position to the number of extra tokens
             new_start_pos = extra
-            # Limit new_tokens_length so that the augmented sequence length (extra + new_tokens_length)
-            # does not exceed the maximum sequence length (self.params.max_seq_len)
+            # Limit new_tokens_length 
             new_tokens_length = min(seqlen, self.params.max_seq_len - extra)
             mask = None
         else:
@@ -425,14 +430,39 @@ class MACTransformer(Transformer):
                 mask = torch.triu(mask, diagonal=1)
                 mask = torch.hstack([torch.zeros((seqlen, start_pos), device=tokens.device), mask]).type_as(h)
 
-        # Now, h has shape (batch, extra + seqlen, dim) in MAC mode and freqs_cis has shape (extra + seqlen, head_dim//2)
-        for layer in self.layers:
+        # Now, run through each transformer layer with NaN checking
+        for i, layer in enumerate(self.layers):
+            h_before = h.clone()
             h = layer(h, new_start_pos, freqs_cis, mask, new_tokens_length=new_tokens_length)
+            
+            # Check if this layer introduced NaNs
+            if torch.isnan(h).any() and not torch.isnan(h_before).any():
+                print(f"[CRITICAL] Layer {i} introduced NaNs!")
+                
+                # Check the core components of this problematic layer
+                if hasattr(layer, 'attention'):
+                    print(f"[DEBUG] Layer {i} attention: W_q has NaNs: {torch.isnan(layer.attention.wq.weight).any()}")
+                    print(f"[DEBUG] Layer {i} attention: W_k has NaNs: {torch.isnan(layer.attention.wk.weight).any()}")
+                    print(f"[DEBUG] Layer {i} attention: W_v has NaNs: {torch.isnan(layer.attention.wv.weight).any()}")
+                    print(f"[DEBUG] Layer {i} attention: W_o has NaNs: {torch.isnan(layer.attention.wo.weight).any()}")
+                
+                if hasattr(layer, 'feed_forward'):
+                    ffn = layer.feed_forward
+                    if hasattr(ffn, 'w1') and ffn.w1 is not None:
+                        print(f"[DEBUG] Layer {i} ffn: W_1 has NaNs: {torch.isnan(ffn.w1.weight).any()}")
+                    if hasattr(ffn, 'w2') and ffn.w2 is not None:
+                        print(f"[DEBUG] Layer {i} ffn: W_2 has NaNs: {torch.isnan(ffn.w2.weight).any()}")
+                    if hasattr(ffn, 'w3') and ffn.w3 is not None:
+                        print(f"[DEBUG] Layer {i} ffn: W_3 has NaNs: {torch.isnan(ffn.w3.weight).any()}")
+            
         h = self.norm(h)
+        print(f"[DEBUG] After final norm: {h.shape}, any NaN: {torch.isnan(h).any()}")
+        
         output = self.output(h).float()
+        print(f"[DEBUG] Final output: {output.shape}, any NaN: {torch.isnan(output).any()}")
 
         if use_mac:
-            # Update long-term memory using the original current segment embeddings.
+            # Update long-term memory using the original current segment embeddings
             original_segment = h[:, -seqlen:, :].detach()
             self.mac_module.update(original_segment)
             output = output[:, -seqlen:, :]
