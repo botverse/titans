@@ -16,6 +16,7 @@ import socket
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 import fairscale.nn.model_parallel.initialize as fs_init
+import wandb
 
 def is_datacenter():
     """Check if we're running in a datacenter environment"""
@@ -186,6 +187,20 @@ class DistillationTrainer:
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
         self.scaler = torch.amp.GradScaler()
 
+        if self.is_main_process:
+            wandb.init(
+                project="titans-distillation",
+                config={
+                    "teacher_model_id": teacher_model_id,
+                    "batch_size": batch_size,
+                    "max_length": max_length,
+                    "temperature": temperature,
+                    "alpha": alpha,
+                    "learning_rate": 1e-4,
+                    "distributed": distributed,
+                }
+            )
+
     def prepare_batch(self, batch):
         """Tokenize and prepare batch for training"""
         encoded = self.tokenizer(
@@ -227,6 +242,9 @@ class DistillationTrainer:
         total_task_loss = 0
         num_batches = 0
         
+        # Before the batch loop, initialize previous memory state
+        previous_memory_state = self.student.module.mac_module.long_term_memory.clone().detach()
+        
         with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
             for batch in pbar:
                 self.optimizer.zero_grad()
@@ -234,12 +252,12 @@ class DistillationTrainer:
                 inputs = self.prepare_batch(batch)
                 
                 # Teacher forward pass (no gradients needed)
-                with torch.no_grad(), torch.amp.autocast("cuda"):
+                with torch.no_grad(), torch.cuda.amp.autocast():
                     teacher_outputs = self.teacher(**inputs)
                     teacher_logits = teacher_outputs.logits
                 
                 # Student forward pass and backward pass (must be in same AMP context)
-                with torch.amp.autocast("cuda"):
+                with torch.cuda.amp.autocast():
                     student_outputs = self.student(
                         tokens=inputs["input_ids"],
                         start_pos=0,
@@ -252,26 +270,55 @@ class DistillationTrainer:
                         inputs["input_ids"]
                     )
                 
-                # Backward pass must be immediately after forward pass within AMP context
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                    self.optimizer.zero_grad()
                 
-                # Update running averages
                 total_loss += loss.item()
                 total_distil_loss += distil_loss.item()
                 total_task_loss += task_loss.item()
                 num_batches += 1
                 
                 if self.is_main_process:
+                    wandb.log({
+                        "batch_loss": loss.item(),
+                        "batch_distil_loss": distil_loss.item(),
+                        "batch_task_loss": task_loss.item(),
+                    })
+                    
                     pbar.set_postfix({
                         'loss': loss.item(),
                         'distil_loss': distil_loss.item(),
                         'task_loss': task_loss.item()
                     })
+
+                    # Inside the batch loop, after optimizer step:
+                    mac_module = self.student.module.mac_module
+                    memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
+
+                    wandb.log({
+                        "MAC/memory_update_magnitude": memory_update_magnitude,
+                        "MAC/persistent_memory": wandb.Histogram(mac_module.persistent_memory.cpu().detach().numpy()),
+                        "MAC/long_term_memory": wandb.Histogram(mac_module.long_term_memory.cpu().detach().numpy()),
+                    })
+
+                    previous_memory_state = mac_module.long_term_memory.clone().detach()
         
-        # Log epoch metrics to tensorboard
+        if self.is_main_process:
+            avg_loss = total_loss / num_batches
+            avg_distil_loss = total_distil_loss / num_batches
+            avg_task_loss = total_task_loss / num_batches
+            
+            wandb.log({
+                "epoch": epoch,
+                "avg_loss": avg_loss,
+                "avg_distil_loss": avg_distil_loss,
+                "avg_task_loss": avg_task_loss,
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+            })
+        
+        return total_loss / num_batches
         if self.is_main_process and self.writer is not None:
             avg_loss = total_loss / num_batches
             avg_distil_loss = total_distil_loss / num_batches
@@ -364,6 +411,8 @@ def main():
             trainer.writer.close()
 
     finally:
+        if trainer.is_main_process:
+            wandb.finish()
         cleanup()
 if __name__ == "__main__":
     main()
