@@ -220,27 +220,57 @@ class DistillationTrainer:
         )
         return {k: v.to(self.device) for k, v in encoded.items()}
 
-    def compute_loss(self, teacher_logits, student_logits, labels):
-        """Compute combined distillation and task loss"""
-        # Distillation loss (KL divergence)
-        distil_loss = (
-            F.kl_div(
-                F.log_softmax(student_logits / self.temperature, dim=-1),
-                F.softmax(teacher_logits / self.temperature, dim=-1),
-                reduction="batchmean",
-            )
-            * (self.temperature ** 2)
+    def compute_loss(self, teacher_logits, student_logits, input_ids):
+        """Compute the distillation and task losses"""
+        if self.is_main_process:
+            # Check inputs for NaNs
+            debug_nans(teacher_logits, "teacher_logits_input")
+            debug_nans(student_logits, "student_logits_input")
+        
+        # Temperature scaling for distillation
+        teacher_logits_scaled = teacher_logits / self.temperature
+        student_logits_scaled = student_logits / self.temperature
+        
+        if self.is_main_process:
+            # Check after scaling
+            debug_nans(teacher_logits_scaled, "teacher_logits_scaled")
+            debug_nans(student_logits_scaled, "student_logits_scaled")
+        
+        # Create targets for next token prediction
+        shift_logits = student_logits[..., :-1, :].contiguous()
+        shift_labels = input_ids[..., 1:].contiguous()
+        
+        # Cross-entropy loss for task objective
+        task_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
         )
         
-        # Task loss (cross entropy)
-        task_loss = F.cross_entropy(student_logits.reshape(-1, student_logits.size(-1)), labels.reshape(-1))
-        # Inside compute_loss after calculating distil_loss and task_loss
         if self.is_main_process:
-            debug_nans(distil_loss, "distil_loss")
-            debug_nans(task_loss, "task_loss")
-            
+            # Check task loss
+            debug_nans(task_loss, "task_loss_before_scaling")
+        
+        # KL divergence for distillation
+        teacher_probs = F.softmax(teacher_logits_scaled[..., :-1, :], dim=-1)
+        distil_loss = F.kl_div(
+            F.log_softmax(student_logits_scaled[..., :-1, :], dim=-1),
+            teacher_probs,
+            reduction="batchmean",
+        )
+        
+        if self.is_main_process:
+            # Check distillation loss components
+            debug_nans(teacher_probs, "teacher_probs")
+            debug_nans(F.log_softmax(student_logits_scaled[..., :-1, :], dim=-1), "student_log_softmax")
+            debug_nans(distil_loss, "distil_loss_before_scaling")
+        
         # Combined loss
-        loss = (self.alpha * distil_loss) + ((1 - self.alpha) * task_loss)
+        loss = self.alpha * distil_loss + (1 - self.alpha) * task_loss
+        
+        if self.is_main_process:
+            # Final loss checks
+            debug_nans(loss, "combined_loss")
+        
         return loss, distil_loss, task_loss
 
     def train_epoch(self, epoch):
@@ -279,125 +309,141 @@ class DistillationTrainer:
 
         previous_memory_state = mac_module.long_term_memory.clone().detach()
         
-        with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
-            for batch_idx, batch in enumerate(pbar):
-                self.optimizer.zero_grad()
-                
-                inputs = self.prepare_batch(batch)
-                
-                # Teacher forward pass (no gradients needed)
-                with torch.no_grad(), torch.amp.autocast("cuda"):
-                    teacher_outputs = self.teacher(**inputs)
-                    teacher_logits = teacher_outputs.logits
-                
-                # Student forward pass and backward pass (must be in same AMP context)
-                with torch.amp.autocast("cuda"):
-                    student_outputs = self.student(
-                        tokens=inputs["input_ids"],
-                        start_pos=0,
-                        use_mac=True
-                    )
-
-                    loss, distil_loss, task_loss = self.compute_loss(
-                        teacher_logits,
-                        student_outputs,
-                        inputs["input_ids"]
-                    )
-                
-                    # Log NaN detection (but don't change training behavior)
-                    if torch.isnan(loss):
-                        nan_count += 1
-                        if self.is_main_process:
-                            print(f"WARNING: NaN detected in loss at batch {batch_idx}")
-                            wandb.log({"nan_detected": batch_idx})
-                
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+        # Add activation monitoring
+        activation_hooks = self.add_activation_monitoring()
+        try:
+            with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
+                for batch_idx, batch in enumerate(pbar):
                     self.optimizer.zero_grad()
-                
-                total_loss += loss.item() if not torch.isnan(loss) else 0
-                total_distil_loss += distil_loss.item() if not torch.isnan(distil_loss) else 0
-                total_task_loss += task_loss.item() if not torch.isnan(task_loss) else 0
-                num_batches += 1
-                
-                if self.is_main_process:
-                    # Log standard metrics (safely handling NaNs)
-                    metrics = {
-                        "batch_loss": loss.item() if not torch.isnan(loss) else -1,
-                        "batch_distil_loss": distil_loss.item() if not torch.isnan(distil_loss) else -1,
-                        "batch_task_loss": task_loss.item() if not torch.isnan(task_loss) else -1,
-                    }
-                    wandb.log(metrics)
                     
-                    pbar.set_postfix({
-                        'loss': loss.item() if not torch.isnan(loss) else float('nan'),
-                        'distil_loss': distil_loss.item() if not torch.isnan(distil_loss) else float('nan'),
-                        'task_loss': task_loss.item() if not torch.isnan(task_loss) else float('nan')
-                    })
+                    inputs = self.prepare_batch(batch)
+                    
+                    # Teacher forward pass (no gradients needed)
+                    with torch.no_grad(), torch.amp.autocast("cuda"):
+                        teacher_outputs = self.teacher(**inputs)
+                        teacher_logits = teacher_outputs.logits
+                    
+                    # Student forward pass and backward pass (must be in same AMP context)
+                    with torch.amp.autocast("cuda"):
+                        student_outputs = self.student(
+                            tokens=inputs["input_ids"],
+                            start_pos=0,
+                            use_mac=True
+                        )
 
-                    # Monitor memory stats - skip histograms if there are NaNs
-                    p_mem = mac_module.persistent_memory.cpu().detach().numpy() 
-                    l_mem = mac_module.long_term_memory.cpu().detach().numpy()
+                        loss, distil_loss, task_loss = self.compute_loss(
+                            teacher_logits,
+                            student_outputs,
+                            inputs["input_ids"]
+                        )
                     
-                    # Detect NaNs in memory
-                    has_nan_persistent = np.isnan(p_mem).any()
-                    has_nan_longterm = np.isnan(l_mem).any()
+                        # Log NaN detection (but don't change training behavior)
+                        if torch.isnan(loss):
+                            nan_count += 1
+                            if self.is_main_process:
+                                print(f"WARNING: NaN detected in loss at batch {batch_idx}")
+                                wandb.log({"nan_detected": batch_idx})
                     
-                    if has_nan_persistent or has_nan_longterm:
-                        wandb.log({
-                            "MAC/has_nan_persistent": has_nan_persistent,
-                            "MAC/has_nan_longterm": has_nan_longterm
-                        })
+                        self.scaler.scale(loss).backward()
+
+                        # Add gradient monitoring (before optimizer step)
+                        if not torch.isnan(loss):
+                            model_to_check = self.student.module if self.distributed else self.student
+                            self.log_gradient_stats(model_to_check, batch_idx)
+                    
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                        self.optimizer.zero_grad()
+                    
+                    total_loss += loss.item() if not torch.isnan(loss) else 0
+                    total_distil_loss += distil_loss.item() if not torch.isnan(distil_loss) else 0
+                    total_task_loss += task_loss.item() if not torch.isnan(task_loss) else 0
+                    num_batches += 1
+                    
+                    if self.is_main_process:
+                        # Log standard metrics (safely handling NaNs)
+                        metrics = {
+                            "batch_loss": loss.item() if not torch.isnan(loss) else -1,
+                            "batch_distil_loss": distil_loss.item() if not torch.isnan(distil_loss) else -1,
+                            "batch_task_loss": task_loss.item() if not torch.isnan(task_loss) else -1,
+                        }
+                        wandb.log(metrics)
                         
-                    # Log basic memory statistics
-                    memory_metrics = {}
-                    
-                    # Memory update magnitude
-                    if not has_nan_longterm and not np.isnan(previous_memory_state.cpu().numpy()).any():
-                        memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
-                        memory_metrics["MAC/memory_update_magnitude"] = memory_update_magnitude
-                    
-                    # Basic stats instead of histograms
-                    if not has_nan_persistent:
-                        memory_metrics.update({
-                            "MAC/persistent_memory_min": float(np.min(p_mem)),
-                            "MAC/persistent_memory_max": float(np.max(p_mem)),
-                            "MAC/persistent_memory_mean": float(np.mean(p_mem)),
-                            "MAC/persistent_memory_std": float(np.std(p_mem))
+                        pbar.set_postfix({
+                            'loss': loss.item() if not torch.isnan(loss) else float('nan'),
+                            'distil_loss': distil_loss.item() if not torch.isnan(distil_loss) else float('nan'),
+                            'task_loss': task_loss.item() if not torch.isnan(task_loss) else float('nan')
                         })
-                    
-                    if not has_nan_longterm:
-                        memory_metrics.update({
-                            "MAC/long_term_memory_min": float(np.min(l_mem)),
-                            "MAC/long_term_memory_max": float(np.max(l_mem)),
-                            "MAC/long_term_memory_mean": float(np.mean(l_mem)),
-                            "MAC/long_term_memory_std": float(np.std(l_mem))
-                        })
-                    
-                    wandb.log(memory_metrics)
-                    
-                    # Only update previous memory state if it doesn't have NaNs
-                    if not has_nan_longterm:
-                        previous_memory_state = mac_module.long_term_memory.clone().detach()
-        
-        if self.is_main_process:
-            # Compute safe averages
-            avg_loss = total_loss / max(num_batches, 1)  # Avoid division by zero
-            avg_distil_loss = total_distil_loss / max(num_batches, 1)
-            avg_task_loss = total_task_loss / max(num_batches, 1)
+
+                        # Monitor memory stats - skip histograms if there are NaNs
+                        p_mem = mac_module.persistent_memory.cpu().detach().numpy() 
+                        l_mem = mac_module.long_term_memory.cpu().detach().numpy()
+                        
+                        # Detect NaNs in memory
+                        has_nan_persistent = np.isnan(p_mem).any()
+                        has_nan_longterm = np.isnan(l_mem).any()
+                        
+                        if has_nan_persistent or has_nan_longterm:
+                            wandb.log({
+                                "MAC/has_nan_persistent": has_nan_persistent,
+                                "MAC/has_nan_longterm": has_nan_longterm
+                            })
+                            
+                        # Log basic memory statistics
+                        memory_metrics = {}
+                        
+                        # Memory update magnitude
+                        if not has_nan_longterm and not np.isnan(previous_memory_state.cpu().numpy()).any():
+                            memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
+                            memory_metrics["MAC/memory_update_magnitude"] = memory_update_magnitude
+                        
+                        # Basic stats instead of histograms
+                        if not has_nan_persistent:
+                            memory_metrics.update({
+                                "MAC/persistent_memory_min": float(np.min(p_mem)),
+                                "MAC/persistent_memory_max": float(np.max(p_mem)),
+                                "MAC/persistent_memory_mean": float(np.mean(p_mem)),
+                                "MAC/persistent_memory_std": float(np.std(p_mem))
+                            })
+                        
+                        if not has_nan_longterm:
+                            memory_metrics.update({
+                                "MAC/long_term_memory_min": float(np.min(l_mem)),
+                                "MAC/long_term_memory_max": float(np.max(l_mem)),
+                                "MAC/long_term_memory_mean": float(np.mean(l_mem)),
+                                "MAC/long_term_memory_std": float(np.std(l_mem))
+                            })
+                        
+                        wandb.log(memory_metrics)
+                        
+                        # Only update previous memory state if it doesn't have NaNs
+                        if not has_nan_longterm:
+                            previous_memory_state = mac_module.long_term_memory.clone().detach()
+
+                        # Log activation stats
+                        self.log_activation_stats()
+                
+            if self.is_main_process:
+                # Compute safe averages
+                avg_loss = total_loss / max(num_batches, 1)  # Avoid division by zero
+                avg_distil_loss = total_distil_loss / max(num_batches, 1)
+                avg_task_loss = total_task_loss / max(num_batches, 1)
+                
+                # Log epoch stats
+                wandb.log({
+                    "epoch": epoch,
+                    "avg_loss": avg_loss,
+                    "avg_distil_loss": avg_distil_loss,
+                    "avg_task_loss": avg_task_loss,
+                    "learning_rate": self.optimizer.param_groups[0]['lr'],
+                    "nan_count": nan_count
+                })
             
-            # Log epoch stats
-            wandb.log({
-                "epoch": epoch,
-                "avg_loss": avg_loss,
-                "avg_distil_loss": avg_distil_loss,
-                "avg_task_loss": avg_task_loss,
-                "learning_rate": self.optimizer.param_groups[0]['lr'],
-                "nan_count": nan_count
-            })
-        
-        return total_loss / max(num_batches, 1)  # Avoid division by zero
+            return total_loss / max(num_batches, 1)  # Avoid division by zero
+        finally:
+            # Remove hooks after epoch
+            for hook in activation_hooks:
+                hook.remove()
 
     def load_checkpoint(self, checkpoint_path):
         """Load checkpoint and resume training state"""
@@ -421,6 +467,92 @@ class DistillationTrainer:
         if self.is_main_process:
             print(f"Resuming from epoch {self.start_epoch}")
             print(f"Previous loss: {checkpoint['loss']}")
+
+    def log_gradient_stats(self, model, step):
+        """Log gradient statistics to wandb"""
+        if not self.is_main_process:
+            return
+        
+        grad_norm_dict = {}
+        max_grad_dict = {}
+        has_nan_dict = {}
+        
+        # Check gradients for each parameter group
+        for name, param in model.named_parameters():
+            if param.grad is not None:
+                grad = param.grad
+                
+                # Calculate gradient norm
+                grad_norm = torch.norm(grad).item()
+                grad_norm_dict[f"grad_norm/{name}"] = grad_norm
+                
+                # Calculate max gradient
+                max_grad = torch.max(torch.abs(grad)).item()
+                max_grad_dict[f"grad_max/{name}"] = max_grad
+                
+                # Check for NaNs
+                has_nan = torch.isnan(grad).any().item()
+                has_nan_dict[f"grad_nan/{name}"] = has_nan
+        
+        # Log aggregated statistics
+        wandb.log({
+            "grad/mean_norm": np.mean(list(grad_norm_dict.values())),
+            "grad/max_norm": np.max(list(grad_norm_dict.values())),
+            "grad/max_value": np.max(list(max_grad_dict.values())),
+            "grad/has_nan": any(has_nan_dict.values()),
+            **grad_norm_dict,
+            **max_grad_dict,
+            **has_nan_dict
+        }, step=step)
+
+    def add_activation_monitoring(self):
+        """Add hooks to monitor activations"""
+        self.activation_hooks = []
+        self.activation_stats = {}
+        
+        def hook_fn(name):
+            def fn(module, input, output):
+                if not self.is_main_process:
+                    return
+                    
+                # For list/tuple outputs, check the first item
+                if isinstance(output, (list, tuple)):
+                    output = output[0]
+                    
+                # Skip non-tensor outputs
+                if not isinstance(output, torch.Tensor):
+                    return
+                    
+                # Check for NaNs
+                has_nan = torch.isnan(output).any().item()
+                
+                if has_nan or np.random.random() < 0.01:  # Log all NaNs + random sampling
+                    self.activation_stats[f"act_nan/{name}"] = has_nan
+                    
+                    if not has_nan:
+                        # Only log these if not NaN to avoid errors
+                        self.activation_stats[f"act_mean/{name}"] = output.mean().item()
+                        self.activation_stats[f"act_std/{name}"] = output.std().item()
+                        self.activation_stats[f"act_max/{name}"] = output.abs().max().item()
+            
+            return fn
+        
+        # Register hooks for modules
+        model = self.student.module if self.distributed else self.student
+        for name, module in model.named_modules():
+            if isinstance(module, (nn.Linear, nn.LayerNorm)) or "RMSNorm" in module.__class__.__name__:
+                hook = module.register_forward_hook(hook_fn(name))
+                self.activation_hooks.append(hook)
+        
+        return self.activation_hooks
+
+    def log_activation_stats(self):
+        """Log activation statistics to wandb"""
+        if not self.is_main_process or not self.activation_stats:
+            return
+        
+        wandb.log(self.activation_stats)
+        self.activation_stats = {}  # Clear stats after logging
 
 def main():
     try:
