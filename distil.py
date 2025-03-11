@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 import fairscale.nn.model_parallel.initialize as fs_init
 import wandb
+import numpy as np
 
 def is_datacenter():
     """Check if we're running in a datacenter environment"""
@@ -241,6 +242,7 @@ class DistillationTrainer:
         total_distil_loss = 0
         total_task_loss = 0
         num_batches = 0
+        nan_count = 0
         
         # Before the batch loop, initialize previous memory state
         if self.distributed:
@@ -251,7 +253,7 @@ class DistillationTrainer:
         previous_memory_state = mac_module.long_term_memory.clone().detach()
         
         with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
                 self.optimizer.zero_grad()
                 
                 inputs = self.prepare_batch(batch)
@@ -275,70 +277,100 @@ class DistillationTrainer:
                         inputs["input_ids"]
                     )
                 
+                    # Log NaN detection (but don't change training behavior)
+                    if torch.isnan(loss):
+                        nan_count += 1
+                        if self.is_main_process:
+                            print(f"WARNING: NaN detected in loss at batch {batch_idx}")
+                            wandb.log({"nan_detected": batch_idx})
+                
                     self.scaler.scale(loss).backward()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.optimizer.zero_grad()
                 
-                total_loss += loss.item()
-                total_distil_loss += distil_loss.item()
-                total_task_loss += task_loss.item()
+                total_loss += loss.item() if not torch.isnan(loss) else 0
+                total_distil_loss += distil_loss.item() if not torch.isnan(distil_loss) else 0
+                total_task_loss += task_loss.item() if not torch.isnan(task_loss) else 0
                 num_batches += 1
                 
                 if self.is_main_process:
-                    wandb.log({
-                        "batch_loss": loss.item(),
-                        "batch_distil_loss": distil_loss.item(),
-                        "batch_task_loss": task_loss.item(),
-                    })
+                    # Log standard metrics (safely handling NaNs)
+                    metrics = {
+                        "batch_loss": loss.item() if not torch.isnan(loss) else -1,
+                        "batch_distil_loss": distil_loss.item() if not torch.isnan(distil_loss) else -1,
+                        "batch_task_loss": task_loss.item() if not torch.isnan(task_loss) else -1,
+                    }
+                    wandb.log(metrics)
                     
                     pbar.set_postfix({
-                        'loss': loss.item(),
-                        'distil_loss': distil_loss.item(),
-                        'task_loss': task_loss.item()
+                        'loss': loss.item() if not torch.isnan(loss) else float('nan'),
+                        'distil_loss': distil_loss.item() if not torch.isnan(distil_loss) else float('nan'),
+                        'task_loss': task_loss.item() if not torch.isnan(task_loss) else float('nan')
                     })
 
-                    # Inside the batch loop, after optimizer step:
-                    # Get the MAC module based on whether we're distributed or not
-                    memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
-
-                    wandb.log({
-                        "MAC/memory_update_magnitude": memory_update_magnitude,
-                        "MAC/persistent_memory": wandb.Histogram(mac_module.persistent_memory.cpu().detach().numpy()),
-                        "MAC/long_term_memory": wandb.Histogram(mac_module.long_term_memory.cpu().detach().numpy()),
-                    })
-
-                    previous_memory_state = mac_module.long_term_memory.clone().detach()
+                    # Monitor memory stats - skip histograms if there are NaNs
+                    p_mem = mac_module.persistent_memory.cpu().detach().numpy() 
+                    l_mem = mac_module.long_term_memory.cpu().detach().numpy()
+                    
+                    # Detect NaNs in memory
+                    has_nan_persistent = np.isnan(p_mem).any()
+                    has_nan_longterm = np.isnan(l_mem).any()
+                    
+                    if has_nan_persistent or has_nan_longterm:
+                        wandb.log({
+                            "MAC/has_nan_persistent": has_nan_persistent,
+                            "MAC/has_nan_longterm": has_nan_longterm
+                        })
+                        
+                    # Log basic memory statistics
+                    memory_metrics = {}
+                    
+                    # Memory update magnitude
+                    if not has_nan_longterm and not np.isnan(previous_memory_state.cpu().numpy()).any():
+                        memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
+                        memory_metrics["MAC/memory_update_magnitude"] = memory_update_magnitude
+                    
+                    # Basic stats instead of histograms
+                    if not has_nan_persistent:
+                        memory_metrics.update({
+                            "MAC/persistent_memory_min": float(np.min(p_mem)),
+                            "MAC/persistent_memory_max": float(np.max(p_mem)),
+                            "MAC/persistent_memory_mean": float(np.mean(p_mem)),
+                            "MAC/persistent_memory_std": float(np.std(p_mem))
+                        })
+                    
+                    if not has_nan_longterm:
+                        memory_metrics.update({
+                            "MAC/long_term_memory_min": float(np.min(l_mem)),
+                            "MAC/long_term_memory_max": float(np.max(l_mem)),
+                            "MAC/long_term_memory_mean": float(np.mean(l_mem)),
+                            "MAC/long_term_memory_std": float(np.std(l_mem))
+                        })
+                    
+                    wandb.log(memory_metrics)
+                    
+                    # Only update previous memory state if it doesn't have NaNs
+                    if not has_nan_longterm:
+                        previous_memory_state = mac_module.long_term_memory.clone().detach()
         
         if self.is_main_process:
-            avg_loss = total_loss / num_batches
-            avg_distil_loss = total_distil_loss / num_batches
-            avg_task_loss = total_task_loss / num_batches
+            # Compute safe averages
+            avg_loss = total_loss / max(num_batches, 1)  # Avoid division by zero
+            avg_distil_loss = total_distil_loss / max(num_batches, 1)
+            avg_task_loss = total_task_loss / max(num_batches, 1)
             
+            # Log epoch stats
             wandb.log({
                 "epoch": epoch,
                 "avg_loss": avg_loss,
                 "avg_distil_loss": avg_distil_loss,
                 "avg_task_loss": avg_task_loss,
                 "learning_rate": self.optimizer.param_groups[0]['lr'],
+                "nan_count": nan_count
             })
         
-        return total_loss / num_batches
-        if self.is_main_process and self.writer is not None:
-            avg_loss = total_loss / num_batches
-            avg_distil_loss = total_distil_loss / num_batches
-            avg_task_loss = total_task_loss / num_batches
-            
-            self.writer.add_scalar('Loss/train', avg_loss, epoch)
-            self.writer.add_scalar('Loss/distillation', avg_distil_loss, epoch)
-            self.writer.add_scalar('Loss/task', avg_task_loss, epoch)
-            
-            # Add learning rate
-            self.writer.add_scalar('Learning_rate', 
-                                 self.optimizer.param_groups[0]['lr'], 
-                                 epoch)
-        
-        return total_loss / num_batches
+        return total_loss / max(num_batches, 1)  # Avoid division by zero
 
     def load_checkpoint(self, checkpoint_path):
         """Load checkpoint and resume training state"""
