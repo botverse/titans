@@ -243,7 +243,12 @@ class DistillationTrainer:
         num_batches = 0
         
         # Before the batch loop, initialize previous memory state
-        previous_memory_state = self.student.module.mac_module.long_term_memory.clone().detach()
+        if self.distributed:
+            mac_module = self.student.module.mac_module
+        else:
+            mac_module = self.student.mac_module
+        
+        previous_memory_state = mac_module.long_term_memory.clone().detach()
         
         with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
             for batch in pbar:
@@ -294,7 +299,7 @@ class DistillationTrainer:
                     })
 
                     # Inside the batch loop, after optimizer step:
-                    mac_module = self.student.module.mac_module
+                    # Get the MAC module based on whether we're distributed or not
                     memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
 
                     wandb.log({
