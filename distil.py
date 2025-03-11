@@ -212,11 +212,11 @@ class DistillationTrainer:
         )
         
         # Initialize MAC module with careful initialization
+        # Using only the known parameters from the error messages
         mac_module = MACModule(
             dim=student_params.dim,
             num_persistent=16,
-            num_memories=1024,
-            alpha=0.1,
+            alpha=0.1
         )
         
         # Print MAC module parameters for debugging

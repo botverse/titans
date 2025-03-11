@@ -170,18 +170,20 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
 
+        # Reshape for attention computation
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
+        # Apply rotary embeddings
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # Repeat KV heads if necessary
-        xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        xk = repeat_kv(xk, self.n_rep)
+        xv = repeat_kv(xv, self.n_rep)
 
         # Transpose for attention computation
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xq = xq.transpose(1, 2)
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
 
@@ -192,27 +194,28 @@ class Attention(nn.Module):
         # Calculate attention scores and apply mask
         scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
         
-        # Check for NaNs or extreme values in scores before softmax (crucial point for stability)
+        # Safety check for NaNs or extreme values in scores
         if torch.isnan(scores).any() or torch.isinf(scores).any():
-            print("[WARNING] NaNs or Infs detected in attention scores")
+            print(f"[WARNING] NaNs or Infs detected in attention scores: shape={scores.shape}")
             scores = torch.nan_to_num(scores, nan=0.0, posinf=20.0, neginf=-20.0)
         
-        # Apply mask and attention
+        # Apply mask if provided
         if mask is not None:
-            scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            scores = scores + mask
         
         # Constrain scores to reasonable range for numerical stability
         scores = torch.clamp(scores, min=-50.0, max=50.0)
         
-        # Apply softmax and dropout
+        # Apply softmax (use float for better numerical stability)
         scores = F.softmax(scores.float(), dim=-1).type_as(x)
         
-        # Check again after softmax (these are the attention weights)
+        # Safety check for NaNs in attention weights
         if torch.isnan(scores).any():
-            print("[WARNING] NaNs detected after softmax in attention")
-            scores = torch.nan_to_num(scores, nan=1.0/scores.size(-1))  # Uniform attention as fallback
+            print(f"[WARNING] NaNs detected in attention weights after softmax: shape={scores.shape}")
+            scores = torch.nan_to_num(scores, nan=1.0/scores.size(-1))
         
-        output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
+        # Apply attention
+        output = torch.matmul(scores, xv)
         
         # Reshape output
         output = output.transpose(1, 2).contiguous().view(bsz, -1, self.n_local_heads * self.head_dim)
