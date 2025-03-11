@@ -409,10 +409,10 @@ def main():
         # Close tensorboard writer
         if trainer.is_main_process and trainer.writer is not None:
             trainer.writer.close()
-
     finally:
         if trainer.is_main_process:
             wandb.finish()
         cleanup()
+
 if __name__ == "__main__":
     main()
