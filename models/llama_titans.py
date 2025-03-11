@@ -345,9 +345,35 @@ class MACModule(nn.Module):
     
     def update(self, segment: torch.Tensor):
         with torch.no_grad():
+            # Compute segment mean - add safety checks
             new_info = segment.mean(dim=1)
-            new_info = new_info.mean(dim=0, keepdim=True)
-            self.long_term_memory = (1 - self.alpha) * self.long_term_memory + self.alpha * new_info.expand_as(self.long_term_memory)
+            
+            # Check if new_info has NaNs before using it
+            if torch.isnan(new_info).any():
+                print("[WARNING] NaNs detected in segment mean, skipping memory update")
+                return
+            
+            # Check if mean is all zeros (potential issue)
+            if torch.all(new_info == 0):
+                print("[WARNING] All-zero segment mean detected, skipping memory update")
+                return
+            
+            # Create batch mean by safely averaging across batch dimension
+            if new_info.shape[0] > 0:  # Make sure batch dimension isn't empty
+                new_info = new_info.mean(dim=0, keepdim=True)
+                
+                # Safety check memory before updating
+                if torch.isnan(self.long_term_memory).any():
+                    print("[WARNING] NaNs detected in long_term_memory before update, resetting")
+                    self.long_term_memory.zero_()
+                    
+                # Update with stable interpolation
+                self.long_term_memory = (1 - self.alpha) * self.long_term_memory + self.alpha * new_info.expand_as(self.long_term_memory)
+                
+                # Final safety check
+                if torch.isnan(self.long_term_memory).any():
+                    print("[WARNING] NaNs detected in memory after update, resetting")
+                    self.long_term_memory.zero_()
 
 class MACTransformer(Transformer):
     """

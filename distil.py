@@ -222,23 +222,22 @@ class DistillationTrainer:
 
     def compute_loss(self, teacher_logits, student_logits, input_ids):
         """Compute the distillation and task losses"""
-        if self.is_main_process:
-            # Check inputs for NaNs
-            debug_nans(teacher_logits, "teacher_logits_input")
-            debug_nans(student_logits, "student_logits_input")
+        print(f"[DEBUG] compute_loss - teacher_logits: {teacher_logits.shape}, any NaN: {torch.isnan(teacher_logits).any()}")
+        print(f"[DEBUG] compute_loss - student_logits: {student_logits.shape}, any NaN: {torch.isnan(student_logits).any()}")
         
         # Temperature scaling for distillation
         teacher_logits_scaled = teacher_logits / self.temperature
         student_logits_scaled = student_logits / self.temperature
         
-        if self.is_main_process:
-            # Check after scaling
-            debug_nans(teacher_logits_scaled, "teacher_logits_scaled")
-            debug_nans(student_logits_scaled, "student_logits_scaled")
+        print(f"[DEBUG] compute_loss - after scaling - teacher: any NaN: {torch.isnan(teacher_logits_scaled).any()}")
+        print(f"[DEBUG] compute_loss - after scaling - student: any NaN: {torch.isnan(student_logits_scaled).any()}")
         
         # Create targets for next token prediction
         shift_logits = student_logits[..., :-1, :].contiguous()
         shift_labels = input_ids[..., 1:].contiguous()
+        
+        print(f"[DEBUG] compute_loss - shift_logits: {shift_logits.shape}, any NaN: {torch.isnan(shift_logits).any()}")
+        print(f"[DEBUG] compute_loss - shift_labels: {shift_labels.shape}, any NaN: {torch.isnan(shift_labels).any()}")
         
         # Cross-entropy loss for task objective
         task_loss = F.cross_entropy(
@@ -246,30 +245,27 @@ class DistillationTrainer:
             shift_labels.view(-1),
         )
         
-        if self.is_main_process:
-            # Check task loss
-            debug_nans(task_loss, "task_loss_before_scaling")
+        print(f"[DEBUG] compute_loss - task_loss: {task_loss.item()}, is NaN: {torch.isnan(task_loss).any()}")
         
         # KL divergence for distillation
         teacher_probs = F.softmax(teacher_logits_scaled[..., :-1, :], dim=-1)
+        print(f"[DEBUG] compute_loss - teacher_probs: {teacher_probs.shape}, any NaN: {torch.isnan(teacher_probs).any()}")
+        
+        student_log_softmax = F.log_softmax(student_logits_scaled[..., :-1, :], dim=-1)
+        print(f"[DEBUG] compute_loss - student_log_softmax: {student_log_softmax.shape}, any NaN: {torch.isnan(student_log_softmax).any()}")
+        
         distil_loss = F.kl_div(
-            F.log_softmax(student_logits_scaled[..., :-1, :], dim=-1),
+            student_log_softmax,
             teacher_probs,
             reduction="batchmean",
         )
         
-        if self.is_main_process:
-            # Check distillation loss components
-            debug_nans(teacher_probs, "teacher_probs")
-            debug_nans(F.log_softmax(student_logits_scaled[..., :-1, :], dim=-1), "student_log_softmax")
-            debug_nans(distil_loss, "distil_loss_before_scaling")
+        print(f"[DEBUG] compute_loss - distil_loss: {distil_loss.item() if not torch.isnan(distil_loss) else 'NaN'}")
         
         # Combined loss
         loss = self.alpha * distil_loss + (1 - self.alpha) * task_loss
         
-        if self.is_main_process:
-            # Final loss checks
-            debug_nans(loss, "combined_loss")
+        print(f"[DEBUG] compute_loss - final loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
         
         return loss, distil_loss, task_loss
 
