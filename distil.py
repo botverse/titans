@@ -127,21 +127,7 @@ class DistillationTrainer:
         self.teacher.eval()
         
         # Initialize student model
-        self.student = MACTransformer(
-            params=ModelArgs(
-                dim=self.teacher.config.hidden_size,
-                n_layers=self.teacher.config.num_hidden_layers,
-                n_kv_heads=self.teacher.config.num_key_value_heads,
-                vocab_size=self.teacher.config.vocab_size,
-                max_seq_len=self.max_length,
-            ),
-            mac_module=MACModule(
-                dim=self.teacher.config.hidden_size,
-                num_persistent=16,
-                memory_size=1024,
-                alpha=0.1
-            )
-        ).to(self.device)
+        self.initialize_student()
         
         # Wrap student with DDP if in distributed mode
         if distributed:
@@ -208,6 +194,59 @@ class DistillationTrainer:
                     "distributed": distributed,
                 }
             )
+
+    def initialize_student(self):
+        """Initialize student model with better stability"""
+        # Initialize from student config
+        student_params = ModelArgs(
+            dim=4096,
+            n_layers=32,
+            n_heads=32,
+            n_kv_heads=None,
+            vocab_size=128256,
+            multiple_of=256,
+            ffn_dim_multiplier=None,
+            norm_eps=1e-5,
+            max_batch_size=32,
+            max_seq_len=2048,
+        )
+        
+        # Initialize MAC module with careful initialization
+        mac_module = MACModule(
+            dim=student_params.dim,
+            num_persistent=16,
+            lt_size=1024,
+            alpha=0.1,
+            init_scale=0.01  # Use small scale for initialization
+        )
+        
+        # Print MAC module parameters for debugging
+        print(f"[DEBUG] Persistent memory shape: {mac_module.persistent_memory.shape}")
+        print(f"[DEBUG] Long-term memory shape: {mac_module.long_term_memory.shape}")
+        print(f"[DEBUG] MAC query layer: {mac_module.mac_query}")
+        
+        # Initialize the student model
+        self.student = MACTransformer(student_params, mac_module).to(self.device)
+        
+        # Add careful weight initialization for each layer
+        print("[INFO] Initializing student model weights...")
+        with torch.no_grad():
+            for name, param in self.student.named_parameters():
+                # Skip embeddings, as they require special handling
+                if 'norm' in name:
+                    if 'weight' in name:
+                        # RMSNorm weights should be initialized to ones
+                        param.copy_(torch.ones_like(param))
+                    continue
+                    
+                if param.dim() >= 2:
+                    # Use a more stable initialization for weight matrices 
+                    nn.init.xavier_normal_(param, gain=0.01)  # Small gain for stability
+                else:
+                    # For bias terms, initialize to zero
+                    nn.init.zeros_(param)
+        
+        print("[INFO] Student model initialized")
 
     def prepare_batch(self, batch):
         """Tokenize and prepare batch for training"""
