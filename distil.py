@@ -349,7 +349,6 @@ class DistillationTrainer:
                     with torch.amp.autocast("cuda"):
                         student_outputs = self.student(
                             tokens=inputs["input_ids"],
-                            start_pos=0,
                             use_mac=True
                         )
 

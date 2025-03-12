@@ -79,67 +79,37 @@ class MACTransformer(nn.Module):
         """Enable gradient checkpointing for memory efficiency"""
         self.llama.gradient_checkpointing_enable()
         
-    def forward(self, tokens: torch.Tensor, start_pos: int = 0, use_mac: bool = True):
-        """Forward pass with MAC augmentation"""
-        bsz, seqlen = tokens.shape
+    def forward(self, tokens: torch.Tensor, use_mac: bool = True):
+        bsz, seqlen = tokens.shape  # (B, T)
         
         if not use_mac:
-            # Standard forward pass without MAC
-            # Create 2D position_ids for standard forward pass
-            position_ids = torch.arange(seqlen, dtype=torch.long, device=tokens.device)
-            position_ids = position_ids.unsqueeze(0).expand(bsz, -1)  # (B, seqlen)
-            
-            outputs = self.llama(input_ids=tokens, position_ids=position_ids)
-            return outputs.logits
+            # Standard forward with explicit 2D position_ids
+            position_ids = torch.arange(seqlen, device=tokens.device)
+            position_ids = position_ids.expand(bsz, -1)  # (B, T)
+            return self.llama(input_ids=tokens, position_ids=position_ids).logits
         
-        # Get embeddings for the current segment
-        with torch.no_grad():
-            inputs_embeds = self.llama.model.embed_tokens(tokens)  # (B, T, C)
+        # MAC path remains mostly unchanged but simplified
+        inputs_embeds = self.llama.model.embed_tokens(tokens)  # (B, T, C)
         
-        # Retrieve long-term memory summary
-        h_mem = self.mac_module.retrieve(inputs_embeds)  # (B, C)
-        h_mem = h_mem.unsqueeze(1)  # (B, 1, C)
+        # Memory operations
+        h_mem = self.mac_module.retrieve(inputs_embeds).unsqueeze(1)  # (B, 1, C)
+        p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(bsz, -1, -1)  # (B, P, C)
         
-        # Expand persistent memory tokens to batch dimension
-        p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(bsz, -1, -1)  # (B, num_persistent, C)
+        # Concatenate memory components
+        combined_embeds = torch.cat([p_mem, h_mem, inputs_embeds], dim=1)  # (B, P+1+T, C)
+        seq_len = combined_embeds.shape[1]
         
-        # Concatenate: persistent tokens, retrieved memory, then original embeddings
-        combined_embeds = torch.cat([p_mem, h_mem, inputs_embeds], dim=1)  # (B, num_persistent + 1 + T, C)
+        # Critical fix: Always create full 2D position_ids
+        position_ids = torch.arange(seq_len, device=tokens.device).expand(bsz, -1)  # (B, S)
         
-        # Calculate positions for the concatenated sequence
-        prefix_length = p_mem.shape[1] + h_mem.shape[1]
-        combined_seq_len = combined_embeds.shape[1]
-        
-        # FIXED: Always create 2D position_ids with batch dimension
-        position_ids = torch.arange(
-            start_pos, start_pos + combined_seq_len, dtype=torch.long, device=tokens.device
-        )
-        # Ensure position_ids has shape [batch_size, seq_len]
-        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)  # (B, combined_seq_len)
-        
-        # Create attention mask that allows all tokens to attend to all tokens
-        attention_mask = torch.ones(
-            (bsz, combined_seq_len), device=tokens.device, dtype=torch.bool
-        )
-        
-        # Forward pass using embeddings - FORCE 2D position_ids
         outputs = self.llama(
             inputs_embeds=combined_embeds,
-            position_ids=position_ids,  # Already 2D: [B, seq_len]
-            attention_mask=attention_mask,
-            return_dict=True
+            position_ids=position_ids,
+            attention_mask=torch.ones_like(position_ids, dtype=torch.bool)
         )
         
-        # Extract logits for original sequence only
-        logits = outputs.logits[:, prefix_length:, :]  # (B, T, vocab_size)
+        # Memory update and logit extraction
+        if outputs.hidden_states:
+            self.mac_module.update(outputs.hidden_states[-1][:, p_mem.shape[1]+1:, :].detach())
         
-        # Update long-term memory with the processed representations
-        last_hidden_state = outputs.hidden_states[-1] if outputs.hidden_states else None
-        if last_hidden_state is not None:
-            original_segment = last_hidden_state[:, prefix_length:, :].detach()
-            self.mac_module.update(original_segment)
-        
-        assert position_ids.ndim == 2, f"position_ids must be 2D, got {position_ids.shape}"
-        assert position_ids.shape == (bsz, combined_embeds.shape[1])
-        
-        return logits
+        return outputs.logits[:, p_mem.shape[1]+1:, :]  # (B, T, V)
