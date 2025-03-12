@@ -472,32 +472,25 @@ class DistillationTrainer:
                 hook.remove()
 
     def load_checkpoint(self, checkpoint_path):
-        """Load checkpoint and resume training state"""
-        if checkpoint_path is None:
-            print("No checkpoint path provided.")
-            return
-        
-        # Ensure the checkpoint path is absolute
-        checkpoint_path = os.path.abspath(checkpoint_path)
-
-        # Check if the checkpoint file exists
-        if not os.path.exists(checkpoint_path):
+        """Load checkpoint safely"""
+        if not os.path.isfile(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
-        
+
         print(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         # Load model state
+        state_dict = checkpoint['student_state_dict']
         if self.distributed:
-            self.student.module.load_state_dict(checkpoint['student_state_dict'])
+            self.student.module.load_state_dict(state_dict)
         else:
-            self.student.load_state_dict(checkpoint['student_state_dict'])
+            self.student.load_state_dict(state_dict)
 
-        # Load optimizer state
+        # Load optimizer and scaler states
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
 
-        # Set starting epoch
-        self.start_epoch = checkpoint['epoch'] + 1
+        self.start_epoch = checkpoint.get('epoch', 0) + 1
 
         if self.is_main_process:
             wandb.log({
@@ -592,61 +585,50 @@ class DistillationTrainer:
         self.activation_stats = {}  # Clear stats after logging
 
 def main():
-    trainer = None  # Initialize to None to avoid UnboundLocalError
-    try:
-        # Initialize distributed training if applicable
-        distributed = setup_distributed()
+    distributed = setup_distributed()
 
-        # Create checkpoint and log directories
-        log_dir = Path("runs/distillation")
-        checkpoint_dir = Path("checkpoints")
+    log_dir = Path("runs/distillation")
+    checkpoint_dir = Path("checkpoints")
 
-        if (distributed and int(os.environ['LOCAL_RANK']) == 0) or (not distributed):
-            log_dir.mkdir(parents=True, exist_ok=True)
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if (distributed and int(os.environ['LOCAL_RANK']) == 0) or (not distributed):
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
-        # Check for latest checkpoint
-        latest_checkpoint = None
-        if checkpoint_dir.exists():
-            checkpoints = list(checkpoint_dir.glob("checkpoint_epoch_*.pt"))
-            if checkpoints:
-                latest_checkpoint = max(checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
+    latest_checkpoint = None
+    if checkpoint_dir.exists():
+        checkpoints = sorted(checkpoint_dir.glob('checkpoint_epoch_*.pt'), key=os.path.getmtime)
+        if checkpoints:
+            latest_checkpoint = checkpoints[-1]
 
-        trainer = DistillationTrainer(
-            teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-            log_dir=str(log_dir),
-            checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
-            batch_size=2,
-            max_length=512,
-            temperature=2.0,
-            alpha=0.5,
-            distributed=distributed
-        )
+    trainer = DistillationTrainer(
+        teacher_model_id="your_teacher_model_id",
+        log_dir=str(log_dir),
+        checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
+        batch_size=2,
+        max_length=512,
+        temperature=2.0,
+        alpha=0.5,
+        distributed=distributed
+    )
 
-        num_epochs = 1  # <-- set epochs to 1 for quick testing
-        for epoch in range(trainer.start_epoch, num_epochs):
-            loss = trainer.train_epoch(epoch)
+    num_epochs = 1
+    for epoch in range(trainer.start_epoch, num_epochs):
+        loss = trainer.train_epoch(epoch)
 
-            if trainer.is_main_process:
-                print(f"Epoch {epoch} average loss: {loss}")
+        if trainer.is_main_process:
+            state_dict = trainer.student.module.state_dict() if distributed else trainer.student.state_dict()
+            checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
+            torch.save({
+                'epoch': epoch,
+                'student_state_dict': state_dict,
+                'optimizer_state_dict': trainer.optimizer.state_dict(),
+                'loss': loss,
+            }, checkpoint_path)
 
-                # Save checkpoint after the epoch
-                state_dict = trainer.student.module.state_dict() if distributed else trainer.student.state_dict()
-                checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
-                torch.save({
-                    'epoch': epoch,
-                    'student_state_dict': state_dict,
-                    'optimizer_state_dict': trainer.optimizer.state_dict(),
-                    'loss': loss,
-                }, checkpoint_path)
+    if trainer.is_main_process and trainer.writer is not None:
+        trainer.writer.close()
 
-        # Close tensorboard writer
-        if trainer.is_main_process and trainer.writer is not None:
-            trainer.writer.close()
-    finally:
-        if trainer is not None and trainer.is_main_process:
-            wandb.finish()
-        cleanup()
+    cleanup()
 
 if __name__ == "__main__":
     main()
