@@ -8,7 +8,7 @@ echo '$nrconf{restart} = '\''a'\'';' | sudo tee /etc/needrestart/conf.d/99restar
 sudo apt update
 sudo apt install -y \
     make build-essential libssl-dev zlib1g-dev \
-    libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm \
+    libbz2-dev libreadline-dev libsqlite3-dev wget curl llvm jq \
     libncurses5-dev libncursesw5-dev xz-utils tk-dev \
     libffi-dev liblzma-dev python3-openssl libpq-dev git
 

@@ -102,6 +102,7 @@ class MACTransformer(nn.Module):
         # Critical fix: Always create full 2D position_ids
         position_ids = torch.arange(seq_len, device=tokens.device).expand(bsz, -1)  # (B, S)
         
+        print("Debug: position_ids shape", position_ids.shape)  # Debugging statement
         outputs = self.llama(
             inputs_embeds=combined_embeds,
             position_ids=position_ids,
