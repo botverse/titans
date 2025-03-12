@@ -291,7 +291,7 @@ class DistillationTrainer:
         
         # Add global step counter
         global_step = epoch * len(self.dataloader)
-        checkpoint_every = 100  # Save every 100 batches
+        checkpoint_every = 10000  # Save every 100 batches
         
         if self.sampler:
             self.sampler.set_epoch(epoch)
