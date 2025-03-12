@@ -588,6 +588,7 @@ class DistillationTrainer:
         self.activation_stats = {}  # Clear stats after logging
 
 def main():
+    trainer = None  # Initialize to None to avoid UnboundLocalError
     try:
         # Initialize distributed training if applicable
         distributed = setup_distributed()
