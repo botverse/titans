@@ -473,9 +473,18 @@ class DistillationTrainer:
 
     def load_checkpoint(self, checkpoint_path):
         """Load checkpoint and resume training state"""
-        if self.is_main_process:
-            wandb.log({"checkpoint": f"Loading checkpoint from {checkpoint_path}"})
+        if checkpoint_path is None:
+            print("No checkpoint path provided.")
+            return
+        
+        # Ensure the checkpoint path is absolute
+        checkpoint_path = os.path.abspath(checkpoint_path)
 
+        # Check if the checkpoint file exists
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
+        
+        print(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         # Load model state
