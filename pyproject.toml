@@ -16,6 +16,9 @@ accelerate = "^1.4.0"
 wandb = "^0.19.7"
 tensorboard = "^2.19.0"
 dotenv = "^0.9.9"
+flax = "^0.10.4"
+jax = "^0.5.2"
+sentencepiece = "^0.2.0"
 
 [[tool.poetry.source]]
 name = "pytorch-cuda"

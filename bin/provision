@@ -12,16 +12,22 @@ sudo apt install -y \
     libncurses5-dev libncursesw5-dev xz-utils tk-dev \
     libffi-dev liblzma-dev python3-openssl libpq-dev git
 
-# Install pyenv
+# Install pyenv with better error handling
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
 
-curl https://pyenv.run | bash
+# Clear any existing pyenv installation to prevent conflicts
+rm -rf "$PYENV_ROOT"
+mkdir -p "$PYENV_ROOT"
+
+# Install pyenv directly without curl pipe
+git clone https://github.com/pyenv/pyenv.git "$PYENV_ROOT"
+cd "$PYENV_ROOT" && src/configure && make -C src
 
 # Add pyenv to PATH and initialize for current session
-eval "$(pyenv init -)"
+eval "$(${PYENV_ROOT}/bin/pyenv init -)"
 
-# Install poetry
+# Install poetry with robust error handling
 curl -sSL https://install.python-poetry.org | python3 -
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -33,14 +39,11 @@ eval "$(pyenv init -)"
 export PATH="$HOME/.local/bin:$PATH"
 EOF
 
-# Install Python version and set up poetry
-pyenv install -s "$(cat .python-version)"
+# Install Python 3.12 specifically
+pyenv install -s 3.12.0
 
-# Activate pyenv Python version
-pyenv global "$(cat .python-version)"
-
-# Install PyTorch with CUDA and NCCL support
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Activate Python 3.12 globally
+pyenv global 3.12.0
 
 # Debug poetry installation
 which poetry
@@ -52,7 +55,7 @@ if ! poetry config virtualenvs.in-project true; then
     exit 1
 fi
 
-if ! poetry env use "$(pyenv prefix "$(cat .python-version)")/bin/python"; then
+if ! poetry env use "$(pyenv prefix 3.12.0)/bin/python"; then
     echo "Failed to set poetry python version"
     exit 1
 fi

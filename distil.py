@@ -1,4 +1,6 @@
 import dotenv
+
+from models.hf_llama.modeling_llama import LlamaForCausalLM
 dotenv.load_dotenv()
 
 import os
@@ -8,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer, BatchEncoding, LlamaConfig
 from models.llama_titans import MACModule, MACTransformer, ModelArgs
 from datasets import load_dataset
 from tqdm import tqdm
@@ -107,7 +109,7 @@ class DistillationTrainer:
         self.max_length = max_length
         
         # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(teacher_model_id, token=os.getenv("HF_TOKEN"))
+        self.tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(teacher_model_id, token=os.getenv("HF_TOKEN"))
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
@@ -117,7 +119,7 @@ class DistillationTrainer:
         else:
             device_map = "auto"
             
-        self.teacher = AutoModelForCausalLM.from_pretrained(
+        self.teacher: LlamaForCausalLM  = AutoModelForCausalLM.from_pretrained(
             teacher_model_id,
             torch_dtype=torch.bfloat16,
             device_map=device_map,
@@ -196,50 +198,32 @@ class DistillationTrainer:
             )
 
     def initialize_student(self):
-        """Initialize student model with same parameters as teacher but with better numerical stability"""
-        # Use the same architecture size as before
-        student_params = ModelArgs(
-            dim=4096,
-            n_layers=32,
-            n_heads=32,
-            n_kv_heads=None,
-            vocab_size=128256,
-            multiple_of=256,
-            ffn_dim_multiplier=None,
-            norm_eps=1e-5,
-            max_batch_size=32,
-            max_seq_len=2048,
-        )
+        """Initialize student model with same vocab size as teacher"""
+        # Get the teacher's vocab size
+        teacher_config = self.teacher.config
         
-        # Initialize MAC module with minimal logging
+        # Create the MAC module
         mac_module = MACModule(
-            dim=student_params.dim,
+            dim=teacher_config.hidden_size,
             num_persistent=16,
+            memory_size=1024,
             alpha=0.1
         )
         
-        # Initialize the student model
-        self.student = MACTransformer(student_params, mac_module).to(self.device)
+        # Initialize student model
+        student = MACTransformer(config=teacher_config, mac_module=mac_module)
         
-        # Enable gradient checkpointing to save memory
-        self.student.gradient_checkpointing_enable()
+        # Enable gradient checkpointing for memory efficiency
+        student.gradient_checkpointing_enable()
         
-        # Careful initialization without excessive printouts or checks
-        with torch.no_grad():
-            for name, param in self.student.named_parameters():
-                if 'norm' in name and 'weight' in name:
-                    param.copy_(torch.ones_like(param))
-                elif param.dim() >= 2:
-                    # Use a memory-efficient initialization
-                    nn.init.xavier_normal_(param, gain=0.01)
-            
-        # Done initialization
-        if self.is_main_process:
-            print("[INFO] Student model initialized")
+        # Move to appropriate device
+        student.to(self.device)
+        
+        return student
 
-    def prepare_batch(self, batch):
+    def prepare_batch(self, batch: dict[str, list[str]]):
         """Tokenize and prepare batch for training"""
-        encoded = self.tokenizer(
+        encoded: BatchEncoding = self.tokenizer(
             batch["text"],
             padding=True,
             truncation=True,
