@@ -97,6 +97,15 @@ class DistillationTrainer:
             self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
             self.is_main_process = True
         
+        # Initialize wandb only on the main process
+        if self.is_main_process:
+            wandb.init(project="titans-distillation", config={
+                "batch_size": batch_size,
+                "max_length": max_length,
+                "temperature": temperature,
+                "alpha": alpha
+            })
+
         # Initialize tensorboard writer only on main process
         if self.is_main_process:
             self.writer = SummaryWriter(log_dir)
@@ -181,20 +190,6 @@ class DistillationTrainer:
         # Initialize optimizer
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
         self.scaler = torch.amp.GradScaler()
-
-        if self.is_main_process:
-            wandb.init(
-                project="titans-distillation",
-                config={
-                    "teacher_model_id": teacher_model_id,
-                    "batch_size": batch_size,
-                    "max_length": max_length,
-                    "temperature": temperature,
-                    "alpha": alpha,
-                    "learning_rate": 1e-4,
-                    "distributed": distributed,
-                }
-            )
 
     def initialize_student(self):
         """Initialize student model with same vocab size as teacher"""
