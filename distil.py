@@ -604,14 +604,14 @@ def main():
         teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
         log_dir=str(log_dir),
         checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
-        batch_size=8,
+        batch_size=1024,
         max_length=512,
         temperature=2.0,
         alpha=0.5,
         distributed=distributed
     )
 
-    num_epochs = 1
+    num_epochs = 2  # <-- increase this to at least checkpoint epoch + 1
     for epoch in range(trainer.start_epoch, num_epochs):
         loss = trainer.train_epoch(epoch)
 
