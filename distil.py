@@ -129,7 +129,7 @@ class DistillationTrainer:
             
         self.teacher = AutoModelForCausalLM.from_pretrained(
             teacher_model_id,
-            torch_dtype=torch.float16,  # Use half precision for teacher
+            torch_dtype=torch.float16,
             device_map=device_map,
             token=os.getenv("HF_TOKEN")
         )
@@ -147,6 +147,10 @@ class DistillationTrainer:
                 output_device=int(os.environ["LOCAL_RANK"])
             )
         
+        # Initialize optimizer and scaler BEFORE loading checkpoint
+        self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
+        self.scaler = torch.amp.GradScaler()
+
         # Load checkpoint if provided
         self.start_epoch = 0
         if checkpoint_path is not None:
@@ -186,10 +190,6 @@ class DistillationTrainer:
                 for sample in batch
             ]}
         )
-        
-        # Initialize optimizer
-        self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
-        self.scaler = torch.amp.GradScaler()
 
     def initialize_student(self):
         """Initialize student model with same vocab size as teacher"""
