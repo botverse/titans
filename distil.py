@@ -604,7 +604,7 @@ def main():
         teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
         log_dir=str(log_dir),
         checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
-        batch_size=256,
+        batch_size=128,
         max_length=512,
         temperature=2.0,
         alpha=0.5,
