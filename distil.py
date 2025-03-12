@@ -605,7 +605,7 @@ def main():
         log_dir=str(log_dir),
         checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
         batch_size=32,
-        max_length=2048,
+        max_length=512,
         temperature=2.0,
         alpha=0.5,
         distributed=distributed
