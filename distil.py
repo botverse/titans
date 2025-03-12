@@ -601,7 +601,7 @@ def main():
             latest_checkpoint = checkpoints[-1]
 
     trainer = DistillationTrainer(
-        teacher_model_id="your_teacher_model_id",
+        teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
         log_dir=str(log_dir),
         checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
         batch_size=2,

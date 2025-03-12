@@ -1,5 +1,7 @@
 #!/bin/bash
 
+. ../.env
+
 # Exit if no command is provided
 if [ $# -eq 0 ]; then
     echo "Usage: notify <command> [arguments...]"
