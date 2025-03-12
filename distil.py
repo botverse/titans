@@ -241,51 +241,51 @@ class DistillationTrainer:
         return {k: v.to(self.device) for k, v in encoded.items()}
 
     def compute_loss(self, teacher_logits, student_logits, input_ids):
-        """Compute the distillation and task losses"""
-        print(f"[DEBUG] compute_loss - teacher_logits: {teacher_logits.shape}, any NaN: {torch.isnan(teacher_logits).any()}")
-        print(f"[DEBUG] compute_loss - student_logits: {student_logits.shape}, any NaN: {torch.isnan(student_logits).any()}")
+        """Compute distillation loss between teacher and student models"""
+        # Get the actual vocab size (for mixed-precision safety)
+        vocab_size = student_logits.shape[-1]
         
-        # Temperature scaling for distillation
-        teacher_logits_scaled = teacher_logits / self.temperature
-        student_logits_scaled = student_logits / self.temperature
+        # Extract non-padding tokens
+        if self.tokenizer.pad_token_id is not None:
+            padding_mask = input_ids != self.tokenizer.pad_token_id
+        else:
+            padding_mask = torch.ones_like(input_ids, dtype=torch.bool)
         
-        print(f"[DEBUG] compute_loss - after scaling - teacher: any NaN: {torch.isnan(teacher_logits_scaled).any()}")
-        print(f"[DEBUG] compute_loss - after scaling - student: any NaN: {torch.isnan(student_logits_scaled).any()}")
+        # Use only the logits for non-padding tokens in loss computation
+        teacher_logits_filtered = teacher_logits[padding_mask]
+        student_logits_filtered = student_logits[padding_mask]
+        labels_filtered = input_ids[padding_mask]
         
-        # Create targets for next token prediction
-        shift_logits = student_logits[..., :-1, :].contiguous()
-        shift_labels = input_ids[..., 1:].contiguous()
-        
-        print(f"[DEBUG] compute_loss - shift_logits: {shift_logits.shape}, any NaN: {torch.isnan(shift_logits).any()}")
-        print(f"[DEBUG] compute_loss - shift_labels: {shift_labels.shape}, any NaN: {torch.isnan(shift_labels).any()}")
-        
-        # Cross-entropy loss for task objective
-        task_loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-        )
-        
-        print(f"[DEBUG] compute_loss - task_loss: {task_loss.item()}, is NaN: {torch.isnan(task_loss).any()}")
-        
-        # KL divergence for distillation
-        teacher_probs = F.softmax(teacher_logits_scaled[..., :-1, :], dim=-1)
-        print(f"[DEBUG] compute_loss - teacher_probs: {teacher_probs.shape}, any NaN: {torch.isnan(teacher_probs).any()}")
-        
-        student_log_softmax = F.log_softmax(student_logits_scaled[..., :-1, :], dim=-1)
-        print(f"[DEBUG] compute_loss - student_log_softmax: {student_log_softmax.shape}, any NaN: {torch.isnan(student_log_softmax).any()}")
-        
+        # Compute KL divergence loss for distillation
+        # Scale logits by temperature for smoother probability distribution
+        teacher_probs = F.softmax(teacher_logits_filtered / self.temperature, dim=-1)
         distil_loss = F.kl_div(
-            student_log_softmax,
+            F.log_softmax(student_logits_filtered / self.temperature, dim=-1),
             teacher_probs,
-            reduction="batchmean",
+            reduction="batchmean"
+        ) * (self.temperature ** 2)
+        
+        # Compute task loss (prediction of next token)
+        task_loss = F.cross_entropy(
+            student_logits_filtered.view(-1, vocab_size),
+            labels_filtered.view(-1)
         )
         
-        print(f"[DEBUG] compute_loss - distil_loss: {distil_loss.item() if not torch.isnan(distil_loss) else 'NaN'}")
-        
-        # Combined loss
+        # Combine losses with weighting factor alpha
         loss = self.alpha * distil_loss + (1 - self.alpha) * task_loss
         
-        print(f"[DEBUG] compute_loss - final loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
+        # Check for NaN values and log them rather than printing
+        if torch.isnan(loss):
+            if self.is_main_process:
+                wandb.log({
+                    "nan_loss/total": True,
+                    "nan_loss/distil": torch.isnan(distil_loss).item(),
+                    "nan_loss/task": torch.isnan(task_loss).item(),
+                    "debug/teacher_logits_max": teacher_logits_filtered.max().item(),
+                    "debug/teacher_logits_min": teacher_logits_filtered.min().item(),
+                    "debug/student_logits_max": student_logits_filtered.max().item(),
+                    "debug/student_logits_min": student_logits_filtered.min().item()
+                })
         
         return loss, distil_loss, task_loss
 
@@ -480,7 +480,7 @@ class DistillationTrainer:
     def load_checkpoint(self, checkpoint_path):
         """Load checkpoint and resume training state"""
         if self.is_main_process:
-            print(f"Loading checkpoint from {checkpoint_path}")
+            wandb.log({"checkpoint": f"Loading checkpoint from {checkpoint_path}"})
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
@@ -497,8 +497,10 @@ class DistillationTrainer:
         self.start_epoch = checkpoint['epoch'] + 1
 
         if self.is_main_process:
-            print(f"Resuming from epoch {self.start_epoch}")
-            print(f"Previous loss: {checkpoint['loss']}")
+            wandb.log({
+                "checkpoint/resume_epoch": self.start_epoch,
+                "checkpoint/previous_loss": checkpoint['loss']
+            })
 
     def log_gradient_stats(self, model, step):
         """Log gradient statistics to wandb"""
