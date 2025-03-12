@@ -294,6 +294,10 @@ class DistillationTrainer:
         self.student.train()
         self.teacher.eval()
         
+        # Add global step counter
+        global_step = epoch * len(self.dataloader)
+        checkpoint_every = 100  # Save every 100 batches
+        
         if self.sampler:
             self.sampler.set_epoch(epoch)
         
@@ -371,6 +375,22 @@ class DistillationTrainer:
                     total_distil_loss += distil_loss.item() if not torch.isnan(distil_loss) else 0
                     total_task_loss += task_loss.item() if not torch.isnan(task_loss) else 0
                     num_batches += 1
+                    
+                    global_step += 1
+                    
+                    # Save checkpoint periodically within epoch
+                    if self.is_main_process and (batch_idx + 1) % checkpoint_every == 0:
+                        state_dict = self.student.module.state_dict() if self.distributed else self.student.state_dict()
+                        checkpoint_path = Path("checkpoints") / f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
+                        torch.save({
+                            'epoch': epoch,
+                            'batch_idx': batch_idx,
+                            'global_step': global_step,
+                            'student_state_dict': state_dict,
+                            'optimizer_state_dict': self.optimizer.state_dict(),
+                            'scaler_state_dict': self.scaler.state_dict(),
+                            'loss': loss.item(),
+                        }, checkpoint_path)
                     
                     if self.is_main_process:
                         # Log standard metrics (safely handling NaNs)
