@@ -127,7 +127,7 @@ class DistillationTrainer:
         self.teacher.eval()
         
         # Initialize student model
-        self.initialize_student()
+        self.student = self.initialize_student()
         
         # Wrap student with DDP if in distributed mode
         if distributed:
