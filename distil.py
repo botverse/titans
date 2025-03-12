@@ -613,9 +613,6 @@ def main():
         # Close tensorboard writer
         if trainer.is_main_process and trainer.writer is not None:
             trainer.writer.close()
-    # catch any errors
-    except Exception as e:
-        print(f"Error: {e}")
     finally:
         if trainer is not None and trainer.is_main_process:
             wandb.finish()
