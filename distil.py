@@ -1,6 +1,4 @@
 import dotenv
-
-from models.hf_llama.modeling_llama import LlamaForCausalLM
 dotenv.load_dotenv()
 
 import os
@@ -10,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
-from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer, BatchEncoding, LlamaConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer, BatchEncoding, LlamaForCausalLM, LlamaConfig
 from models.llama_titans import MACModule, MACTransformer, ModelArgs
 from datasets import load_dataset
 from tqdm import tqdm
