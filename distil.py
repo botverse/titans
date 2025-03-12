@@ -221,9 +221,6 @@ class DistillationTrainer:
         # Initialize student model
         student = MACTransformer(config=config, mac_module=mac_module)
         
-        # Convert to half precision
-        student.half()
-        
         # Enable gradient checkpointing for memory efficiency
         student.gradient_checkpointing_enable()
         
