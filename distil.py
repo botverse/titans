@@ -2,6 +2,7 @@ import dotenv
 dotenv.load_dotenv()
 
 import os
+import copy
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -111,15 +112,15 @@ class DistillationTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
-        # Initialize teacher model
+        # Initialize teacher model with reduced precision
         if distributed:
             device_map = {"": int(os.environ["LOCAL_RANK"])}
         else:
             device_map = "auto"
             
-        self.teacher: LlamaForCausalLM  = AutoModelForCausalLM.from_pretrained(
+        self.teacher = AutoModelForCausalLM.from_pretrained(
             teacher_model_id,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.float16,  # Use half precision for teacher
             device_map=device_map,
             token=os.getenv("HF_TOKEN")
         )
@@ -198,18 +199,30 @@ class DistillationTrainer:
     def initialize_student(self):
         """Initialize student model with same vocab size as teacher"""
         # Get the teacher's vocab size
-        teacher_config = self.teacher.config
+        vocab_size = self.teacher.config.vocab_size
         
+        config = copy.deepcopy(self.teacher.config)
+        config.hidden_size = config.hidden_size // 2
+        config.intermediate_size = config.intermediate_size // 2
+        config.num_attention_heads = config.num_attention_heads // 2
+        config.num_key_value_heads = config.num_key_value_heads // 2
+        config.num_hidden_layers = config.num_hidden_layers // 2
+        config.max_position_embeddings = config.max_position_embeddings // 2
+        config.rms_norm_eps = config.rms_norm_eps / 2
+
         # Create the MAC module
         mac_module = MACModule(
-            dim=teacher_config.hidden_size,
+            dim=config.hidden_size,
             num_persistent=16,
             memory_size=1024,
             alpha=0.1
         )
         
         # Initialize student model
-        student = MACTransformer(config=teacher_config, mac_module=mac_module)
+        student = MACTransformer(config=config, mac_module=mac_module)
+        
+        # Convert to half precision
+        student.half()
         
         # Enable gradient checkpointing for memory efficiency
         student.gradient_checkpointing_enable()
@@ -282,6 +295,8 @@ class DistillationTrainer:
     def train_epoch(self, epoch):
         """Train for one epoch"""
         self.student.train()
+        self.teacher.eval()
+        
         if self.sampler:
             self.sampler.set_epoch(epoch)
         
@@ -328,8 +343,6 @@ class DistillationTrainer:
                     with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
                         teacher_outputs = self.teacher(**inputs)
                         teacher_logits = teacher_outputs.logits
-                        print(f"[DEBUG] Teacher logits shape: {teacher_logits.shape}, any NaN: {torch.isnan(teacher_logits).any()}")
-                        print(f"[DEBUG] Teacher logits range: {teacher_logits.min().item()} to {teacher_logits.max().item()}")
                     
                     # Student forward pass and backward pass (must be in same AMP context)
                     with torch.amp.autocast("cuda"):
@@ -345,23 +358,17 @@ class DistillationTrainer:
                             inputs["input_ids"]
                         )
                     
-                        # Log NaN detection (but don't change training behavior)
-                        if torch.isnan(loss):
-                            nan_count += 1
-                            if self.is_main_process:
-                                print(f"WARNING: NaN detected in loss at batch {batch_idx}")
-                                wandb.log({"nan_detected": batch_idx})
+                    # Scale the loss and backpropagate with AMP
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                     
-                        self.scaler.scale(loss).backward()
-
-                        # Add gradient monitoring (before optimizer step)
-                        if not torch.isnan(loss):
-                            model_to_check = self.student.module if self.distributed else self.student
-                            self.log_gradient_stats(model_to_check, batch_idx)
-                    
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        self.optimizer.zero_grad()
+                    # Log NaN detection (but don't change training behavior)
+                    if torch.isnan(loss):
+                        nan_count += 1
+                        if self.is_main_process:
+                            print(f"WARNING: NaN detected in loss at batch {batch_idx}")
+                            wandb.log({"nan_detected": batch_idx})
                     
                     total_loss += loss.item() if not torch.isnan(loss) else 0
                     total_distil_loss += distil_loss.item() if not torch.isnan(distil_loss) else 0
