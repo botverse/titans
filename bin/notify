@@ -6,13 +6,12 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
-CMD_ARGS="$*"
-
+CMD_ARGS=( "$@" )
 # Record start time
 START_TIME=$(date +%s)
 
 # Execute the command
-eval "$CMD_ARGS"
+"${CMD_ARGS[@]}"
 
 # Get the exit status
 EXIT_STATUS=$?
@@ -22,12 +21,25 @@ END_TIME=$(date +%s)
 ELAPSED=$((END_TIME - START_TIME))
 ELAPSED_STR=$(printf '%02d:%02d:%02d' $((ELAPSED/3600)) $((ELAPSED%3600/60)) $((ELAPSED%60)))
 
+STATUS_STR="Succeeded"
+if [[ $EXIT_STATUS -ne 0 ]]; then
+    STATUS_STR="Failed"
+fi
+
 # Send notification via Pushover
-curl -s \
+response=$(curl -s \
     --form-string "token=$PUSHOVER_APP_TOKEN" \
     --form-string "user=$PUSHOVER_USER_TOKEN" \
-    --form-string "message=Finished: $CMD_ARGS (exit: $EXIT_STATUS) - Time: $ELAPSED_STR" \
-    https://api.pushover.net/1/messages.json
+    --form-string "title=Notify: $STATUS_STR: ${CMD_ARGS[0]}" \
+    --form-string "message=Time: $ELAPSED_STR Command: ${CMD_ARGS[*]}" \
+    https://api.pushover.net/1/messages.json)
 
+# Print response only if there was an error
+if [[ "$(echo "$response" | jq -r '.status')" != "1" ]]; then
+    echo -e "\nPushover API Error:"
+    echo "$response" | jq '.'
+fi
+
+echo "EXIT_STATUS: $EXIT_STATUS, ELAPSED_STR: $ELAPSED_STR"
 # Preserve the original command's exit status
 exit $EXIT_STATUS
