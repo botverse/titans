@@ -107,6 +107,7 @@ class MACTransformer(nn.Module):
         position_ids = torch.arange(
             start_pos, start_pos + combined_embeds.shape[1], dtype=torch.long, device=tokens.device
         )
+        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)  # (1, seq_len) → (B, seq_len)
         
         # Create attention mask that allows all tokens to attend to all tokens
         attention_mask = torch.ones(
