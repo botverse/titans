@@ -85,7 +85,11 @@ class MACTransformer(nn.Module):
         
         if not use_mac:
             # Standard forward pass without MAC
-            outputs = self.llama(input_ids=tokens, position_ids=None)
+            # Create 2D position_ids for standard forward pass
+            position_ids = torch.arange(seqlen, dtype=torch.long, device=tokens.device)
+            position_ids = position_ids.unsqueeze(0).expand(bsz, -1)  # (B, seqlen)
+            
+            outputs = self.llama(input_ids=tokens, position_ids=position_ids)
             return outputs.logits
         
         # Get embeddings for the current segment
@@ -104,20 +108,24 @@ class MACTransformer(nn.Module):
         
         # Calculate positions for the concatenated sequence
         prefix_length = p_mem.shape[1] + h_mem.shape[1]
+        combined_seq_len = combined_embeds.shape[1]
+        
+        # FIXED: Always create 2D position_ids with batch dimension
         position_ids = torch.arange(
-            start_pos, start_pos + combined_embeds.shape[1], dtype=torch.long, device=tokens.device
+            start_pos, start_pos + combined_seq_len, dtype=torch.long, device=tokens.device
         )
-        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)  # (1, seq_len) → (B, seq_len)
+        # Ensure position_ids has shape [batch_size, seq_len]
+        position_ids = position_ids.unsqueeze(0).expand(bsz, -1)  # (B, combined_seq_len)
         
         # Create attention mask that allows all tokens to attend to all tokens
         attention_mask = torch.ones(
-            (bsz, combined_embeds.shape[1]), device=tokens.device, dtype=torch.bool
+            (bsz, combined_seq_len), device=tokens.device, dtype=torch.bool
         )
         
-        # Forward pass using embeddings
+        # Forward pass using embeddings - FORCE 2D position_ids
         outputs = self.llama(
             inputs_embeds=combined_embeds,
-            position_ids=position_ids,
+            position_ids=position_ids,  # Already 2D: [B, seq_len]
             attention_mask=attention_mask,
             return_dict=True
         )
@@ -130,5 +138,8 @@ class MACTransformer(nn.Module):
         if last_hidden_state is not None:
             original_segment = last_hidden_state[:, prefix_length:, :].detach()
             self.mac_module.update(original_segment)
+        
+        assert position_ids.ndim == 2, f"position_ids must be 2D, got {position_ids.shape}"
+        assert position_ids.shape == (bsz, combined_embeds.shape[1])
         
         return logits
