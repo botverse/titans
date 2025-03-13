@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/env bash
 
 export DEBIAN_FRONTEND=noninteractive
 sudo mkdir -p /etc/needrestart/conf.d

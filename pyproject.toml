@@ -4,25 +4,23 @@ version = "0.1.0"
 description = ""
 authors = ["Fonz <fonz@botverse.com>"]
 readme = "README.md"
+package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
-torch = { version = "^2.6.0", source = "pytorch-cuda" }
+torch = { version = "2.5.1", source = "pytorch-cuda" }
 datasets = "^3.2.0"
 transformers = "^4.48.0"
 fairscale = "^0.4.13"
-tiktoken = "^0.9.0"
-accelerate = "^1.4.0"
 wandb = "^0.19.7"
 tensorboard = "^2.19.0"
 dotenv = "^0.9.9"
-flax = "^0.10.4"
-jax = "^0.5.2"
-sentencepiece = "^0.2.0"
+vllm = "^0.7.3"
+numpy = "1.26.4"
 
 [[tool.poetry.source]]
 name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu126"
+url = "https://download.pytorch.org/whl/cu124"
 priority = "explicit"
 
 [build-system]

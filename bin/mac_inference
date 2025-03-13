@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# Check if checkpoint file is provided
+if [ -z "$1" ]; then
+    echo "Usage: $0 <checkpoint_file> [options]"
+    echo "Options:"
+    echo "  --use_mac     Use the MAC model functionality"
+    echo "  --prompt      Custom prompt for the model"
+    exit 1
+fi
+
+CHECKPOINT_FILE=$1
+shift
+EXPORT_DIR="exported_model"
+USE_MAC=false
+PROMPT="Explain quantum computing in simple terms."
+
+# Process options
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --use_mac) USE_MAC=true ;;
+        --prompt) PROMPT="$2"; shift ;;
+        *) echo "Unknown parameter: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# Export model to HF format
+python export_model.py --checkpoint $CHECKPOINT_FILE --output_dir $EXPORT_DIR
+
+# If not using MAC, prepare for vLLM standard mode
+if [ "$USE_MAC" = false ]; then
+    echo "Preparing standard model for vLLM (without MAC)..."
+    VLLM_MODEL_DIR="vllm_model"
+    python prepare_for_vllm.py --checkpoint $CHECKPOINT_FILE --output_dir $VLLM_MODEL_DIR
+    MODEL_PATH=$VLLM_MODEL_DIR
+else
+    echo "Using MAC-enabled model..."
+    MODEL_PATH=$EXPORT_DIR
+fi
+
+# Run inference
+if [ "$USE_MAC" = true ]; then
+    python vllm_inference.py --model_path $MODEL_PATH --use_mac --prompt "$PROMPT"
+else
+    python vllm_inference.py --model_path $MODEL_PATH --prompt "$PROMPT"
+fi 

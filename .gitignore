@@ -6,3 +6,5 @@ runs
 data/
 .env
 .huggingface
+vllm_mac_model/
+checkpoints/
