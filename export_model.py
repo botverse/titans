@@ -5,6 +5,9 @@ import argparse
 from transformers import AutoTokenizer
 import json
 import shutil
+import dotenv
+
+dotenv.load_dotenv()
 
 def export_model_to_hf_format(checkpoint_path, output_dir, config_path=None):
     """
