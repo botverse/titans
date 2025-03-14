@@ -11,7 +11,6 @@ fi
 
 CHECKPOINT_FILE=$1
 shift
-EXPORT_DIR="exported_model"
 USE_MAC=false
 PROMPT="Explain quantum computing in simple terms."
 
@@ -25,9 +24,6 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-# Export model to HF format
-python export_model.py --checkpoint $CHECKPOINT_FILE --output_dir $EXPORT_DIR
-
 # If not using MAC, prepare for vLLM standard mode
 if [ "$USE_MAC" = false ]; then
     echo "Preparing standard model for vLLM (without MAC)..."
@@ -36,6 +32,9 @@ if [ "$USE_MAC" = false ]; then
     MODEL_PATH=$VLLM_MODEL_DIR
 else
     echo "Using MAC-enabled model..."
+    EXPORT_DIR="exported_model"
+    # Export model to HF format
+    python export_model.py --checkpoint $CHECKPOINT_FILE --output_dir $EXPORT_DIR
     MODEL_PATH=$EXPORT_DIR
 fi
 

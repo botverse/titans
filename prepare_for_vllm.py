@@ -2,10 +2,10 @@ import os
 import torch
 from pathlib import Path
 import argparse
-from transformers import LlamaConfig, LlamaForCausalLM, AutoTokenizer
+from transformers import LlamaForCausalLM, AutoTokenizer
 import json
 
-def convert_to_vllm_compatible(checkpoint_path, output_dir):
+def convert_to_vllm_compatible(checkpoint_path, output_dir, config_path=None):
     """
     Convert the model to a vLLM-compatible format by removing MAC-specific components
     """
@@ -16,70 +16,29 @@ def convert_to_vllm_compatible(checkpoint_path, output_dir):
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint['student_state_dict']
     
-    # Infer config from model structure
-    print("Inferring config from model structure...")
-    # Get hidden size from first weight matrix dimension
-    if 'llama.model.embed_tokens.weight' in state_dict:
-        vocab_size, hidden_size = state_dict['llama.model.embed_tokens.weight'].shape
-    else:
-        # Find embed_tokens in the state dict keys
-        embed_key = next((k for k in state_dict.keys() if 'embed_tokens.weight' in k), None)
-        if embed_key:
-            vocab_size, hidden_size = state_dict[embed_key].shape
-        else:
-            # Fallback to a default
-            vocab_size = 32000
-            hidden_size = 2048
-            print("Warning: Could not infer vocab_size and hidden_size from model")
+    # Try to find config file if not provided
+    if config_path is None:
+        # Look in checkpoint directory first
+        checkpoint_dir = Path(checkpoint_path).parent
+        config_path = checkpoint_dir / "initial_config.json"
+        if not config_path.exists():
+            raise ValueError("No config file found. Please specify with --config_path")
     
-    # Count number of layers by looking for layer pattern
-    layer_pattern = 'llama.model.layers.'
-    layer_keys = [k for k in state_dict.keys() if layer_pattern in k]
-    layer_numbers = set()
-    for key in layer_keys:
-        # Extract the layer number from the key
-        parts = key.split(layer_pattern)[1].split('.')
-        if parts and parts[0].isdigit():
-            layer_numbers.add(int(parts[0]))
+    # Load the config
+    print(f"Using config from {config_path}")
+    with open(config_path, 'r') as f:
+        config_data = json.load(f)
     
-    num_hidden_layers = len(layer_numbers) if layer_numbers else 16
+    # Create a model with this config - must modify it for standard LlamaForCausalLM
+    config_data["architectures"] = ["LlamaForCausalLM"]
+    config_data["model_type"] = "llama"
     
-    # Get number of attention heads from q_proj weight dimensions
-    q_proj_key = next((k for k in state_dict.keys() if 'q_proj.weight' in k), None)
-    if q_proj_key and hidden_size > 0:
-        out_dim = state_dict[q_proj_key].shape[0]
-        head_dim = hidden_size // (out_dim // hidden_size)
-        num_attention_heads = out_dim // head_dim
-        num_key_value_heads = num_attention_heads  # Assuming same number for now
-    else:
-        num_attention_heads = 16
-        num_key_value_heads = 16
-        print("Warning: Could not infer num_attention_heads from model")
+    # Remove MAC-specific config
+    if "mac_module_config" in config_data:
+        del config_data["mac_module_config"]
     
-    # Get intermediate size from gate_proj dimensions
-    gate_proj_key = next((k for k in state_dict.keys() if 'gate_proj.weight' in k), None)
-    if gate_proj_key:
-        intermediate_size = state_dict[gate_proj_key].shape[0]
-    else:
-        intermediate_size = hidden_size * 2  # Common ratio in Llama models
-        print("Warning: Could not infer intermediate_size from model")
-    
-    # Create config
-    config = LlamaConfig(
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        num_hidden_layers=num_hidden_layers,
-        num_attention_heads=num_attention_heads,
-        num_key_value_heads=num_key_value_heads,
-        max_position_embeddings=2048,  # Default fallback
-        rms_norm_eps=1e-5
-    )
-    
-    print(f"Inferred config: {config}")
-    
-    # Create a new Llama model
-    model = LlamaForCausalLM(config)
+    # Create the model
+    model = LlamaForCausalLM.from_config(config_data)
     
     # Extract and load only the Llama parts of the state dict
     new_state_dict = {}
@@ -94,18 +53,7 @@ def convert_to_vllm_compatible(checkpoint_path, output_dir):
     # Save the model
     model.save_pretrained(output_dir)
     
-    # Make sure the config file has the correct model type and architecture
-    with open(output_dir / "config.json", "r") as f:
-        config_data = json.load(f)
-    
-    # Override architecture and model type for standard LLaMA
-    config_data["architectures"] = ["LlamaForCausalLM"]
-    config_data["model_type"] = "llama"
-    
-    # Remove any MAC-specific config elements
-    if "mac_module_config" in config_data:
-        del config_data["mac_module_config"]
-    
+    # Save the vLLM compatible config
     with open(output_dir / "config.json", "w") as f:
         json.dump(config_data, f, indent=2)
     
@@ -115,12 +63,12 @@ def convert_to_vllm_compatible(checkpoint_path, output_dir):
     
     print(f"Model converted and saved to {output_dir}")
     print("Note: This version removes the MAC-specific components for vLLM compatibility")
-    print("For full MAC functionality, a custom vLLM implementation would be required")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert distilled model to vLLM-compatible format")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file")
     parser.add_argument("--output_dir", type=str, default="vllm_model", help="Directory to save the vLLM-compatible model")
+    parser.add_argument("--config_path", type=str, default=None, help="Path to the model config file (defaults to initial_config.json in checkpoint dir)")
     
     args = parser.parse_args()
-    convert_to_vllm_compatible(args.checkpoint, args.output_dir) 
+    convert_to_vllm_compatible(args.checkpoint, args.output_dir, args.config_path) 

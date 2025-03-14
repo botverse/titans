@@ -10,7 +10,7 @@ package-mode = false
 python = "^3.12"
 torch = { version = "2.5.1", source = "pytorch-cuda" }
 datasets = "^3.2.0"
-transformers = "^4.48.0"
+transformers = "^4.49.0"
 fairscale = "^0.4.13"
 wandb = "^0.19.7"
 tensorboard = "^2.19.0"

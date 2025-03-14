@@ -8,3 +8,4 @@ data/
 .huggingface
 vllm_mac_model/
 checkpoints/
+wandb/

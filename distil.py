@@ -19,6 +19,7 @@ from pathlib import Path
 import fairscale.nn.model_parallel.initialize as fs_init
 import wandb
 import numpy as np
+import json
 
 def is_datacenter():
     """Check if we're running in a datacenter environment"""
@@ -136,8 +137,41 @@ class DistillationTrainer:
         self.teacher.gradient_checkpointing_enable()
         self.teacher.eval()
         
-        # Initialize student model
-        self.student = self.initialize_student()
+        # Create the student model (with halved dimensions)
+        config = copy.deepcopy(self.teacher.config)
+        config.hidden_size = config.hidden_size // 2
+        config.intermediate_size = config.intermediate_size // 2
+        config.num_attention_heads = config.num_attention_heads // 2
+        config.num_key_value_heads = config.num_key_value_heads // 2
+        config.num_hidden_layers = config.num_hidden_layers // 2
+        config.max_position_embeddings = config.max_position_embeddings // 2
+        config.rms_norm_eps = config.rms_norm_eps / 2
+        # Create the MAC module and add its configuration to the config
+        mac_config = {
+            "num_persistent": 16,
+            "memory_size": 1024,
+            "alpha": 0.1
+        }
+        mac_module = MACModule(
+            dim=config.hidden_size,
+            **mac_config
+        )
+        config.mac_module_config = mac_config
+        
+        # Set proper architecture type and model type
+        config.architectures = ["MACTransformer"]
+        config.model_type = "llama_mac"
+        
+        # Export the config if main process
+        if self.is_main_process:
+            checkpoint_dir = Path("checkpoints")
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            config_path = checkpoint_dir / 'initial_config.json'
+            with open(config_path, 'w') as f:
+                json.dump(config.to_dict(), f, indent=2)
+            print(f"Exported initial config to {config_path}")
+        
+        self.student = MACTransformer(config, mac_module)
         
         # Wrap student with DDP if in distributed mode
         if distributed:
