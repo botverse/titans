@@ -8,19 +8,19 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = "^3.12"
-torch = { version = "2.5.1", source = "pytorch-cuda" }
+torch = { version = "2.6.0", source = "pytorch-cuda" }
 datasets = "^3.2.0"
 transformers = "^4.49.0"
 fairscale = "^0.4.13"
 wandb = "^0.19.7"
 tensorboard = "^2.19.0"
 dotenv = "^0.9.9"
-vllm = "^0.7.3"
-numpy = "1.26.4"
+# vllm = "^0.7.3"
+numpy = "^1.26.4"
 
 [[tool.poetry.source]]
 name = "pytorch-cuda"
-url = "https://download.pytorch.org/whl/cu124"
+url = "https://download.pytorch.org/whl/cu126"
 priority = "explicit"
 
 [build-system]
