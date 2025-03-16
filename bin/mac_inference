@@ -2,7 +2,7 @@
 
 # Check if checkpoint file is provided
 if [ -z "$1" ]; then
-    echo "Usage: $0 <checkpoint_file> [options]"
+    echo "Usage: ./bin/mac_inference <checkpoint_file> [options]"
     echo "Options:"
     echo "  --use_mac     Use the MAC model functionality"
     echo "  --prompt      Custom prompt for the model"
@@ -32,7 +32,7 @@ if [ "$USE_MAC" = false ]; then
     MODEL_PATH=$VLLM_MODEL_DIR
 else
     echo "Using MAC-enabled model..."
-    EXPORT_DIR="exported_model"
+    EXPORT_DIR="vllm_mac_model"
     # Export model to HF format
     python export_model.py --checkpoint $CHECKPOINT_FILE --output_dir $EXPORT_DIR
     MODEL_PATH=$EXPORT_DIR

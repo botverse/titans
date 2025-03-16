@@ -24,8 +24,20 @@ def export_model_to_hf_format(checkpoint_path, output_dir, config_path=None):
     # Extract model state dict
     state_dict = checkpoint['student_state_dict']
     
-    # Save the complete state dict, including MAC parameters
-    torch.save(state_dict, output_dir / "pytorch_model.bin")
+    # Extract and transform model state dict
+    transformed_state_dict = {}
+    for key, value in state_dict.items():
+        # Fix key names for Hugging Face compatibility
+        if key.startswith('llama.'):
+            # For MAC model format
+            new_key = key.replace('llama.', '')
+            transformed_state_dict[new_key] = value
+        else:
+            # For standard format
+            transformed_state_dict[key] = value
+
+    # Save the transformed state dict
+    torch.save(transformed_state_dict, output_dir / "pytorch_model.bin")
     
     # Try to find config file if not provided
     if config_path is None:
@@ -35,11 +47,20 @@ def export_model_to_hf_format(checkpoint_path, output_dir, config_path=None):
         if not config_path.exists():
             raise ValueError("No config file found. Please specify with --config_path")
     
-    # Load and save the config
-    print(f"Using config from {config_path}")
+    # Load and update the config
     with open(config_path, 'r') as f:
         config_data = json.load(f)
     
+    # Ensure all required LLaMA config parameters exist
+    required_config_keys = [
+        'hidden_size', 'intermediate_size', 'num_attention_heads',
+        'num_hidden_layers', 'num_key_value_heads', 'rms_norm_eps',
+        'vocab_size', 'rope_theta'
+    ]
+    for key in required_config_keys:
+        if key not in config_data:
+            config_data[key] = getattr(self.teacher.config, key, None)
+
     # Make sure architectures and model_type are set correctly
     config_data["architectures"] = ["MACTransformer"]
     config_data["model_type"] = "llama_mac"
