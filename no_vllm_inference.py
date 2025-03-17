@@ -50,21 +50,21 @@ def run_inference(model_path, prompts, max_new_tokens=100):
         print(f"\nProcessing prompt: {prompt}")
         print(f"Input shape: {inputs.input_ids.shape}")  # (B, T)
         
-        with torch.no_grad():
+        with torch.inference_mode():
             # Generate text
-            generated_ids = model.generate(
+            output_ids = model.generate(
                 **inputs,
-                max_new_tokens=128,
-                temperature=0.3,  # Lower temperature for more focused output
+                max_new_tokens=64,
+                temperature=0.1,  # MUCH lower temperature
                 top_p=0.9,
-                do_sample=True,
+                do_sample=True,  # You can even set this to False for greedy decoding
                 repetition_penalty=1.2,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id
             )
             
             # Decode the generated text
-            generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+            generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
             print(f"Generated: {generated_text}")
             results.append((prompt, generated_text))
     
