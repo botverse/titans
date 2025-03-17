@@ -171,7 +171,9 @@ class DistillationTrainer:
                 json.dump(config.to_dict(), f, indent=2)
             print(f"Exported initial config to {config_path}")
         
+        # Initialize student model and explicitly move to device
         self.student = MACTransformer(config, mac_module)
+        self.student = self.student.to(self.device)
         
         # Wrap student with DDP if in distributed mode
         if distributed:
@@ -181,7 +183,7 @@ class DistillationTrainer:
                 output_device=int(os.environ["LOCAL_RANK"])
             )
         
-        # Initialize optimizer and scaler BEFORE loading checkpoint
+        # Initialize optimizer and scaler AFTER moving model to device
         self.optimizer = torch.optim.AdamW(self.student.parameters(), lr=1e-4)
         self.scaler = torch.amp.GradScaler()
 
@@ -519,10 +521,21 @@ class DistillationTrainer:
             self.student.module.load_state_dict(state_dict)
         else:
             self.student.load_state_dict(state_dict)
+        
+        # Ensure model is on correct device after loading
+        if self.distributed:
+            self.student.module = self.student.module.to(self.device)
+        else:
+            self.student = self.student.to(self.device)
 
         # Load optimizer state if available
         if 'optimizer_state_dict' in checkpoint:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Move optimizer state to correct device
+            for state in self.optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
         else:
             print("Warning: No optimizer state found in checkpoint")
 
