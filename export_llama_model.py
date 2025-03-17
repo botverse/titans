@@ -23,37 +23,79 @@ def convert_to_vllm_compatible(checkpoint_path, output_dir, config_path=None):
     config_data["architectures"] = ["LlamaForCausalLM"]
     config_data["model_type"] = "llama"  # Ensure standard model type
     
-    # Create config object and model
-    config = LlamaConfig.from_dict(config_data)
-    model = LlamaForCausalLM._from_config(config)  # Use protected method
-    
-    # Load state dict
-    state_dict = torch.load(
+    # Load checkpoint
+    print(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(
         checkpoint_path,
         map_location="cpu",
         weights_only=True
     )
     
-    # Extract and load only the Llama parts of the state dict
+    # Extract state dict
+    state_dict = checkpoint['student_state_dict']
+    
+    # Transform the state dict to match HuggingFace Llama format
     new_state_dict = {}
+    
+    # Track which norm weights were properly transferred
+    norm_layers_transferred = set()
+    
     for key, value in state_dict.items():
+        # Skip MAC-specific parts
+        if key.startswith('mac_module.'):
+            continue
+            
+        # Ensure we keep full precision
+        value = value.float()  # Convert to full precision
+        
         if key.startswith('llama.'):
-            new_key = key.replace('llama.', '')
+            # Extract the relevant part after 'llama.'
+            suffix = key[len('llama.'):]
+            
+            # Handle layernorm weights specially to ensure they're preserved
+            if 'layernorm' in key or 'norm' in key:
+                if key.startswith('llama.model.'):
+                    new_key = key.replace('llama.model.', 'model.')
+                else:
+                    new_key = f"model.{suffix}"
+                norm_layers_transferred.add(new_key)
+            # Regular handling for other keys
+            elif suffix.startswith('model.'):
+                new_key = f"model.{suffix[len('model.'):]}"
+            else:
+                new_key = f"model.{suffix}"
+                
             new_state_dict[new_key] = value
+            
+        elif key.startswith('lm_head.'):
+            # Keep lm_head keys as is
+            new_state_dict[key] = value
     
-    # Load the state dict
-    model.load_state_dict(new_state_dict, strict=False)
-    
-    # Save the model
-    model.save_pretrained(output_dir)
-    
-    # Save the vLLM compatible config
+    # Save the config to the output directory
     with open(output_dir / "config.json", "w") as f:
         json.dump(config_data, f, indent=2)
+    
+    # Save the state dict directly to avoid any automatic processing
+    print(f"Saving state dict with {len(new_state_dict)} keys to {output_dir / 'pytorch_model.bin'}")
+    torch.save(new_state_dict, output_dir / "pytorch_model.bin")
     
     # Copy tokenizer from teacher model
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Meta-Llama-3-8B-Instruct", token=os.getenv("HF_TOKEN"))
     tokenizer.save_pretrained(output_dir)
+    
+    # Create a generation config
+    generation_config = {
+        "do_sample": True,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 50,
+        "max_length": 2048
+    }
+    with open(output_dir / "generation_config.json", "w") as f:
+        json.dump(generation_config, f, indent=2)
+    
+    # Check for norm layers
+    print(f"Transferred {len(norm_layers_transferred)} normalization layers")
     
     print(f"Model converted and saved to {output_dir}")
     print("Note: This version removes the MAC-specific components for vLLM compatibility")
