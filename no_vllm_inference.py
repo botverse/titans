@@ -37,7 +37,14 @@ def run_inference(model_path, prompts, max_new_tokens=100):
     results = []
     for prompt in prompts:
         # Tokenize
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        formatted_prompt = f"<s>[INST] {prompt} [/INST]"  # Use proper Llama3 format
+        inputs = tokenizer(
+            formatted_prompt,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=256  # Much longer than 8!
+        ).to(device)
         
         # Generate with detailed tensor shape logging
         print(f"\nProcessing prompt: {prompt}")
@@ -45,17 +52,19 @@ def run_inference(model_path, prompts, max_new_tokens=100):
         
         with torch.no_grad():
             # Generate text
-            outputs = model.generate(
-                inputs.input_ids,
-                max_new_tokens=max_new_tokens,
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=128,
+                temperature=0.3,  # Lower temperature for more focused output
+                top_p=0.9,
                 do_sample=True,
-                temperature=0.7,
-                top_p=0.95,
-                pad_token_id=tokenizer.pad_token_id
+                repetition_penalty=1.2,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id
             )
             
             # Decode the generated text
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
             print(f"Generated: {generated_text}")
             results.append((prompt, generated_text))
     
