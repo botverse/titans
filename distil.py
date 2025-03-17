@@ -645,7 +645,7 @@ def main():
         distributed=distributed
     )
 
-    num_epochs = 2  # <-- increase this to at least checkpoint epoch + 1
+    num_epochs = 5  # <-- increase this to at least checkpoint epoch + 1
     for epoch in range(trainer.start_epoch, num_epochs):
         loss = trainer.train_epoch(epoch)
 
