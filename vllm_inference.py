@@ -79,92 +79,90 @@ def run_mac_inference(args, sampling_params):
     with open(model_path / "config.json", "r") as f:
         config_dict = json.load(f)
     
-    # Optimize config for inference without changing dimensions
+    # Optimize config for inference
     config = LlamaConfig.from_dict(config_dict)
     config.use_memory_efficient_attention = True
     config.attention_implementation = "eager"
     
-    # Memory optimizations
-    config.max_position_embeddings = min(config.max_position_embeddings, 1024)  # Limit context
-    config.use_cache = True  # Enable KV caching
-    
     # Initialize model
     model = MACLlamaForCausalLM(config)
-    model.eval()  # Ensure eval mode
     
-    # Load state dict efficiently
-    state_dict_path = model_path / "pytorch_model.bin"
-    if state_dict_path.exists():
-        # Load with reduced memory usage
-        state_dict = torch.load(
-            state_dict_path,
-            map_location="cpu",
-            weights_only=True
-        )
-        
-        # Fix state dict keys
-        new_state_dict = {
-            k.replace('llama.model.', 'model.'): v 
-            for k, v in state_dict.items()
-        }
-        
-        # Convert to FP16 if requested
-        if args.force_fp16:
-            new_state_dict = {k: v.half() for k, v in new_state_dict.items()}
-        
-        model.load_state_dict(new_state_dict, strict=False)
+    # Load state dict with proper key mapping
+    state_dict = torch.load(
+        model_path / "pytorch_model.bin",
+        map_location="cpu",
+        weights_only=True  # Important: reduce memory usage during loading
+    )
     
-    # Move to GPU efficiently
+    # Fix state dict keys - this is the critical fix
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith('model.llama.'):
+            # Remove both 'model.' and 'llama.' prefixes
+            new_key = k.replace('model.llama.', '')
+            new_state_dict[f'model.{new_key}'] = v
+        elif k.startswith('llama.'):
+            # Remove 'llama.' prefix
+            new_key = k.replace('llama.', '')
+            new_state_dict[f'model.{new_key}'] = v
+        elif k.startswith('model.'):
+            # Keep as is
+            new_state_dict[k] = v
+        else:
+            # Add 'model.' prefix
+            new_state_dict[f'model.{k}'] = v
+    
+    # Load state dict
+    missing, unexpected = model.load_state_dict(new_state_dict, strict=False)
+    if missing or unexpected:
+        print(f"Missing keys: {missing[:5]}...")
+        print(f"Unexpected keys: {unexpected[:5]}...")
+    
+    # Move to GPU with memory optimizations
     if args.force_fp16:
         model = model.half()
     model = model.to("cuda", non_blocking=True)
+    model.eval()
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
     
-    # Process input with memory constraints
+    # Process input with reduced sequence length
     inputs = tokenizer(
         args.prompt,
         return_tensors="pt",
         padding=True,
         truncation=True,
-        max_length=256  # Reasonable context length
-    )
+        max_length=128  # Reduce from 256 to save memory
+    ).to("cuda", non_blocking=True)
     
-    inputs = {k: v.to("cuda", non_blocking=True) for k, v in inputs.items()}
-    
-    # Memory-efficient generation settings
-    gen_kwargs = {
-        "max_new_tokens": min(args.max_tokens, 128),  # Limit output length
-        "temperature": args.temperature,
-        "top_p": args.top_p,
-        "do_sample": True,
-        "use_mac": True,
-        "use_cache": True,
-        "repetition_penalty": 1.1
-    }
+    print(f"Input prompt: {args.prompt}")
     
     # Generate with memory optimizations
     try:
         with torch.inference_mode(), torch.cuda.amp.autocast(dtype=torch.float16):
-            output_ids = model.generate(**{**inputs, **gen_kwargs})
-            
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=min(args.max_tokens, 64),  # Limit output length
+                temperature=args.temperature,
+                top_p=args.top_p,
+                do_sample=True,
+                use_mac=True,
+                use_cache=True,  # Enable KV caching
+                repetition_penalty=1.1
+            )
+        
         generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-        print(f"\nGenerated text: {generated_text}")
+        print(f"Generated text: {generated_text}")
         
     except RuntimeError as e:
         if "out of memory" in str(e):
-            print("\nOOM error. Memory usage:")
-            print(f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f}GB")
+            print("\nOOM error. Current memory usage:")
             print(f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
             print(f"Reserved: {torch.cuda.memory_reserved() / 1e9:.2f}GB")
-            print(f"Free: {torch.cuda.memory_reserved() - torch.cuda.memory_allocated() / 1e9:.2f}GB")
-            print("\nTry:")
-            print("1. Reducing max_tokens")
-            print("2. Reducing input sequence length")
-            print("3. Using a smaller model")
-        raise
+            print("\nTry reducing sequence length or model size")
+        raise e
 
 if __name__ == "__main__":
     main() 

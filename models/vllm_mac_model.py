@@ -38,72 +38,58 @@ class MACLlamaForCausalLM(LlamaForCausalLM):
         use_mac: bool = True,
     ):
         """Forward pass with MAC module integration"""
-        # Memory optimization: Use inference mode and mixed precision
-        with torch.inference_mode(), torch.cuda.amp.autocast():
-            if not use_mac:
-                return super().forward(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    inputs_embeds=inputs_embeds,
-                    labels=labels,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict
-                )
-            
+        if not use_mac:
+            return super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                labels=labels,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict
+            )
+        
+        # Memory-efficient processing
+        with torch.cuda.amp.autocast():
             # Get batch size and device
             batch_size = input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
             device = input_ids.device if input_ids is not None else inputs_embeds.device
             
-            # Get input embeddings with memory optimization
+            # Get input embeddings
             if inputs_embeds is None:
                 inputs_embeds = self.model.embed_tokens(input_ids)  # (B, T, C)
             
-            # Memory-efficient memory operations
-            with torch.no_grad():  # No gradients needed for memory operations
+            # Memory operations with reduced precision
+            with torch.no_grad():
                 h_mem = self.mac_module.retrieve(inputs_embeds).unsqueeze(1)  # (B, 1, C)
                 p_mem = self.mac_module.persistent_memory.unsqueeze(0).expand(batch_size, -1, -1)  # (B, P, C)
             
-            # Concatenate with reduced memory usage
+            # Concatenate embeddings
             combined_embeds = torch.cat([p_mem, h_mem, inputs_embeds], dim=1)  # (B, P+1+T, C)
             
-            # Create position IDs efficiently
-            seq_len = combined_embeds.shape[1]
-            if position_ids is None:
-                position_ids = torch.arange(seq_len, device=device).expand(batch_size, -1)  # (B, S)
-            
             # Create attention mask efficiently
-            if attention_mask is not None:
-                # Convert to float32 for numerical stability
-                attention_mask = attention_mask.to(dtype=torch.float32)
-                
-                # Create memory prefix mask
-                prefix_mask = torch.ones(
-                    (batch_size, p_mem.shape[1] + 1),
-                    device=device,
-                    dtype=torch.float32
-                )
-                
-                # Combine masks
-                attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
-                
-                # Create 4D attention mask directly
-                attention_mask = attention_mask.view(batch_size, 1, 1, -1)
-                
-                # Apply causal mask
-                causal_mask = torch.triu(
-                    torch.ones((seq_len, seq_len), device=device, dtype=torch.bool),
-                    diagonal=1
-                )
-                attention_mask = attention_mask.masked_fill(causal_mask, float("-inf"))
+            mem_len = p_mem.shape[1] + 1
+            seq_len = combined_embeds.shape[1]
             
-            # Forward pass with memory optimizations
+            # Create causal mask directly in the correct shape
+            causal_mask = torch.triu(
+                torch.full((seq_len, seq_len), float('-inf'), device=device),
+                diagonal=1
+            )
+            
+            # Allow memory tokens to attend to each other
+            causal_mask[:mem_len, :mem_len] = 0
+            
+            # Create position IDs efficiently
+            position_ids = torch.arange(seq_len, device=device).expand(batch_size, -1)
+            
+            # Forward pass with optimized memory usage
             outputs = super().forward(
                 input_ids=None,
-                attention_mask=attention_mask,
+                attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 inputs_embeds=combined_embeds,
@@ -115,15 +101,12 @@ class MACLlamaForCausalLM(LlamaForCausalLM):
             )
             
             # Update memory efficiently
-            if outputs.hidden_states:
+            if outputs.hidden_states is not None:
                 with torch.no_grad():
-                    self.mac_module.update(
-                        outputs.hidden_states[-1][:, p_mem.shape[1]+1:, :].detach()
-                    )
+                    self.mac_module.update(outputs.hidden_states[-1][:, mem_len:, :].detach())
             
-            # Extract logits efficiently
-            logits = outputs.logits[:, p_mem.shape[1]+1:, :]
-            outputs.logits = logits
+            # Extract relevant logits
+            outputs.logits = outputs.logits[:, mem_len:, :]
             
             return outputs
 
