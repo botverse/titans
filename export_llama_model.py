@@ -2,7 +2,7 @@ import os
 import torch
 from pathlib import Path
 import argparse
-from transformers import LlamaForCausalLM, AutoTokenizer
+from transformers import LlamaForCausalLM, AutoTokenizer, LlamaConfig
 import json
 
 def convert_to_vllm_compatible(checkpoint_path, output_dir, config_path=None):
@@ -12,33 +12,27 @@ def convert_to_vllm_compatible(checkpoint_path, output_dir, config_path=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    state_dict = checkpoint['student_state_dict']
-    
-    # Try to find config file if not provided
+    # Load config properly
     if config_path is None:
-        # Look in checkpoint directory first
-        checkpoint_dir = Path(checkpoint_path).parent
-        config_path = checkpoint_dir / "initial_config.json"
-        if not config_path.exists():
-            raise ValueError("No config file found. Please specify with --config_path")
+        config_path = Path(checkpoint_path).parent / "initial_config.json"
     
-    # Load the config
-    print(f"Using config from {config_path}")
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config_data = json.load(f)
     
-    # Create a model with this config - must modify it for standard LlamaForCausalLM
+    # Reset architecture to standard Llama
     config_data["architectures"] = ["LlamaForCausalLM"]
-    config_data["model_type"] = "llama"
+    config_data["model_type"] = "llama"  # Ensure standard model type
     
-    # Remove MAC-specific config
-    if "mac_module_config" in config_data:
-        del config_data["mac_module_config"]
+    # Create config object and model
+    config = LlamaConfig.from_dict(config_data)
+    model = LlamaForCausalLM._from_config(config)  # Use protected method
     
-    # Create the model
-    model = LlamaForCausalLM.from_config(config_data)
+    # Load state dict
+    state_dict = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True
+    )
     
     # Extract and load only the Llama parts of the state dict
     new_state_dict = {}

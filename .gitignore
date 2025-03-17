@@ -9,3 +9,5 @@ data/
 vllm_mac_model/
 checkpoints/
 wandb/
+vllm_mac_model*/
+vllm_model

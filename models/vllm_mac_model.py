@@ -74,22 +74,17 @@ class MACLlamaForCausalLM(LlamaForCausalLM):
             mem_len = p_mem.shape[1] + 1
             seq_len = combined_embeds.shape[1]
             
-            # Create causal mask directly in the correct shape
-            causal_mask = torch.triu(
-                torch.full((seq_len, seq_len), float('-inf'), device=device),
-                diagonal=1
-            )
-            
-            # Allow memory tokens to attend to each other
-            causal_mask[:mem_len, :mem_len] = 0
-            
             # Create position IDs efficiently
             position_ids = torch.arange(seq_len, device=device).expand(batch_size, -1)
+            
+            # Let the parent class handle the causal mask creation
+            # Instead of creating our own causal mask, we'll pass None
+            # and let the LlamaModel._update_causal_mask handle it properly
             
             # Forward pass with optimized memory usage
             outputs = super().forward(
                 input_ids=None,
-                attention_mask=causal_mask,
+                attention_mask=None,  # Let the model create the causal mask correctly
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 inputs_embeds=combined_embeds,
