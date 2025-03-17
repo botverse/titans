@@ -416,8 +416,8 @@ class DistillationTrainer:
                             'global_step': global_step,
                             'student_state_dict': state_dict,
                             'optimizer_state_dict': self.optimizer.state_dict(),
-                            'scaler_state_dict': self.scaler.state_dict(),
-                            'loss': loss.item(),
+                            'scaler_state_dict': self.scaler.state_dict(),  # Always save scaler state
+                            'loss': loss.item() if not torch.isnan(loss) else float('nan'),
                         }, checkpoint_path)
                     
                     if self.is_main_process:
@@ -520,16 +520,24 @@ class DistillationTrainer:
         else:
             self.student.load_state_dict(state_dict)
 
-        # Load optimizer and scaler states
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        # Load optimizer state if available
+        if 'optimizer_state_dict' in checkpoint:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        else:
+            print("Warning: No optimizer state found in checkpoint")
+
+        # Load scaler state if available
+        if 'scaler_state_dict' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        else:
+            print("Warning: No scaler state found in checkpoint, using default initialization")
 
         self.start_epoch = checkpoint.get('epoch', 0) + 1
 
         if self.is_main_process:
             wandb.log({
                 "checkpoint/resume_epoch": self.start_epoch,
-                "checkpoint/previous_loss": checkpoint['loss']
+                "checkpoint/previous_loss": checkpoint.get('loss', float('nan'))
             })
 
     def log_gradient_stats(self, model, step):
@@ -656,6 +664,7 @@ def main():
                 'epoch': epoch,
                 'student_state_dict': state_dict,
                 'optimizer_state_dict': trainer.optimizer.state_dict(),
+                'scaler_state_dict': trainer.scaler.state_dict(),  # Always save scaler state
                 'loss': loss,
             }, checkpoint_path)
 
