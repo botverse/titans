@@ -4,6 +4,9 @@ from pathlib import Path
 import argparse
 from transformers import LlamaForCausalLM, AutoTokenizer, LlamaConfig
 import json
+import dotenv
+
+dotenv.load_dotenv()
 
 def convert_to_vllm_compatible(checkpoint_path, output_dir, config_path=None):
     """
