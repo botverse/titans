@@ -20,6 +20,9 @@ import fairscale.nn.model_parallel.initialize as fs_init
 import wandb
 import numpy as np
 import json
+from datetime import datetime
+import yaml
+import argparse
 
 def is_datacenter():
     """Check if we're running in a datacenter environment"""
@@ -76,18 +79,101 @@ def debug_nans(tensor, name):
     if np.isnan(tensor_np).any():
         wandb.log({f"nan_check/{name}_percentage": np.isnan(tensor_np).mean() * 100})
 
+def find_latest_experiment():
+    """Find the most recent experiment directory"""
+    runs_dir = Path("runs")
+    if not runs_dir.exists():
+        return None
+    
+    # Find all experiment directories
+    experiments = [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith("distil_")]
+    if not experiments:
+        return None
+    
+    # Sort by creation time and return the latest
+    return max(experiments, key=lambda x: x.stat().st_mtime)
+
+def setup_experiment(args):
+    """Setup experiment directory and save configurations"""
+    if args.resume:
+        # Find the latest experiment
+        exp_dir = find_latest_experiment()
+        if exp_dir is None:
+            raise ValueError("No existing experiments found to resume from")
+        print(f"Resuming from experiment: {exp_dir}")
+        
+        # Load existing config
+        config_path = exp_dir / "config" / "config.yaml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                existing_config = yaml.safe_load(f)
+                # Update args with saved config while preserving new command line args
+                for k, v in existing_config.items():
+                    if not hasattr(args, k) or getattr(args, k) is None:
+                        setattr(args, k, v)
+        
+        return exp_dir
+    
+    # Create new experiment as before
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_name = f"distil_{timestamp}"
+    if not args.use_mac:
+        exp_name += "_no_mac"
+    
+    # Create experiment directory structure
+    exp_dir = Path("runs") / exp_name
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create subdirectories
+    checkpoints_dir = exp_dir / "checkpoints"
+    tensorboard_dir = exp_dir / "tensorboard"
+    config_dir = exp_dir / "config"
+    
+    for d in [checkpoints_dir, tensorboard_dir, config_dir]:
+        d.mkdir(parents=True, exist_ok=True)
+    
+    # Save experiment config
+    config = vars(args)
+    config['timestamp'] = timestamp
+    with open(config_dir / "config.yaml", 'w') as f:
+        yaml.dump(config, f)
+    
+    return exp_dir
+
 class DistillationTrainer:
     def __init__(
         self,
         teacher_model_id: str,
-        log_dir: str = "runs/distillation",
+        exp_dir: Path,
         checkpoint_path: str = None,
         batch_size: int = 8,
         max_length: int = 256,
         temperature: float = 2.0,
         alpha: float = 0.5,
-        distributed: bool = False
+        distributed: bool = False,
+        use_mac: bool = True,  # Add MAC flag
     ):
+        self.exp_dir = exp_dir
+        self.use_mac = use_mac
+        
+        # Initialize wandb with experiment config
+        if self.is_main_process:
+            wandb.init(
+                project="titans-distillation",
+                name=exp_dir.name,
+                config={
+                    "batch_size": batch_size,
+                    "max_length": max_length,
+                    "temperature": temperature,
+                    "alpha": alpha,
+                    "use_mac": use_mac
+                },
+                dir=str(exp_dir)
+            )
+            
+            # Initialize tensorboard writer with experiment directory
+            self.writer = SummaryWriter(exp_dir / "tensorboard")
+        
         self.distributed = distributed
         self.world_size = get_world_size()
         
@@ -98,21 +184,6 @@ class DistillationTrainer:
             self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
             self.is_main_process = True
         
-        # Initialize wandb only on the main process
-        if self.is_main_process:
-            wandb.init(project="titans-distillation", config={
-                "batch_size": batch_size,
-                "max_length": max_length,
-                "temperature": temperature,
-                "alpha": alpha
-            })
-
-        # Initialize tensorboard writer only on main process
-        if self.is_main_process:
-            self.writer = SummaryWriter(log_dir)
-        else:
-            self.writer = None
-            
         self.temperature = temperature
         self.alpha = alpha
         self.max_length = max_length
@@ -146,25 +217,31 @@ class DistillationTrainer:
         config.num_hidden_layers = config.num_hidden_layers // 2
         config.max_position_embeddings = config.max_position_embeddings // 2
         config.rms_norm_eps = config.rms_norm_eps / 2
-        # Create the MAC module and add its configuration to the config
-        mac_config = {
-            "num_persistent": 16,
-            "memory_size": 1024,
-            "alpha": 0.1
-        }
-        mac_module = MACModule(
-            dim=config.hidden_size,
-            **mac_config
-        )
-        config.mac_module_config = mac_config
         
-        # Set proper architecture type and model type
-        config.architectures = ["MACTransformer"]
-        config.model_type = "llama_mac"
-        
-        # Export the config if main process
+        # Modify student model initialization based on use_mac flag
+        if use_mac:
+            # Create the MAC module and add its configuration
+            mac_config = {
+                "num_persistent": 16,
+                "memory_size": 1024,
+                "alpha": 0.1
+            }
+            mac_module = MACModule(
+                dim=config.hidden_size,
+                **mac_config
+            )
+            config.mac_module_config = mac_config
+            config.architectures = ["MACTransformer"]
+            config.model_type = "llama_mac"
+            self.student = MACTransformer(config, mac_module)
+        else:
+            # Use standard LlamaForCausalLM for non-MAC version
+            config.architectures = ["LlamaForCausalLM"]
+            config.model_type = "llama"
+            self.student = LlamaForCausalLM(config)
+
         if self.is_main_process:
-            checkpoint_dir = Path("checkpoints")
+            checkpoint_dir = self.exp_dir / "checkpoints"
             checkpoint_dir.mkdir(parents=True, exist_ok=True)
             config_path = checkpoint_dir / 'initial_config.json'
             with open(config_path, 'w') as f:
@@ -172,7 +249,6 @@ class DistillationTrainer:
             print(f"Exported initial config to {config_path}")
         
         # Initialize student model and explicitly move to device
-        self.student = MACTransformer(config, mac_module)
         self.student = self.student.to(self.device)
         
         # Wrap student with DDP if in distributed mode
@@ -411,7 +487,7 @@ class DistillationTrainer:
                     # Save checkpoint periodically within epoch
                     if self.is_main_process and (batch_idx + 1) % checkpoint_every == 0:
                         state_dict = self.student.module.state_dict() if self.distributed else self.student.state_dict()
-                        checkpoint_path = Path("checkpoints") / f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
+                        checkpoint_path = self.exp_dir / "checkpoints" / f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
                         torch.save({
                             'epoch': epoch,
                             'batch_idx': batch_idx,
@@ -639,51 +715,91 @@ class DistillationTrainer:
         wandb.log(self.activation_stats)
         self.activation_stats = {}  # Clear stats after logging
 
+    def save_checkpoint(self, epoch: int, loss: float, batch_idx: int = None):
+        """Save checkpoint with consistent naming"""
+        if not self.is_main_process:
+            return
+            
+        checkpoint_name = f'checkpoint_epoch_{epoch}'
+        if batch_idx is not None:
+            checkpoint_name += f'_batch_{batch_idx}'
+        checkpoint_name += '.pt'
+        
+        checkpoint_path = self.exp_dir / "checkpoints" / checkpoint_name
+        
+        state_dict = self.student.module.state_dict() if self.distributed else self.student.state_dict()
+        torch.save({
+            'epoch': epoch,
+            'batch_idx': batch_idx,
+            'student_state_dict': state_dict,
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scaler_state_dict': self.scaler.state_dict(),
+            'loss': loss,
+            'config': {
+                'use_mac': self.use_mac,
+                # Add other relevant config items
+            }
+        }, checkpoint_path)
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--teacher-model-id", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct",
+                       help="Path to the teacher model")
+    parser.add_argument("--batch-size", type=int, default=8,
+                       help="Batch size for training")
+    parser.add_argument("--max-length", type=int, default=256,
+                       help="Maximum sequence length for input")
+    parser.add_argument("--temperature", type=float, default=2.0,
+                       help="Temperature for distillation")
+    parser.add_argument("--alpha", type=float, default=0.5,
+                       help="Weighting factor for distillation loss")
+    parser.add_argument("--use-mac", action="store_true", default=True,
+                       help="Use MAC module in student model")
+    parser.add_argument("--resume", action="store_true", 
+                       help="Resume from latest experiment instead of creating new one")
+    
+    args = parser.parse_args()
+    
+    # Setup distributed training
     distributed = setup_distributed()
-
-    log_dir = Path("runs/distillation")
-    checkpoint_dir = Path("checkpoints")
-
-    if (distributed and int(os.environ['LOCAL_RANK']) == 0) or (not distributed):
-        Path(log_dir).mkdir(parents=True, exist_ok=True)
-        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-
+    
+    # Setup experiment directory and save config
+    exp_dir = setup_experiment(args)
+    
+    # Find latest checkpoint
     latest_checkpoint = None
-    if checkpoint_dir.exists():
-        checkpoints = sorted(checkpoint_dir.glob('checkpoint_epoch_*.pt'), key=os.path.getmtime)
+    checkpoints_dir = exp_dir / "checkpoints"
+    if checkpoints_dir.exists():
+        checkpoints = sorted(checkpoints_dir.glob('checkpoint_epoch_*.pt'), key=os.path.getmtime)
         if checkpoints:
             latest_checkpoint = checkpoints[-1]
-
+            print(f"Found checkpoint: {latest_checkpoint}")
+    
     trainer = DistillationTrainer(
-        teacher_model_id="meta-llama/Meta-Llama-3-8B-Instruct",
-        log_dir=str(log_dir),
+        teacher_model_id=args.teacher_model_id,
+        exp_dir=exp_dir,
         checkpoint_path=str(latest_checkpoint) if latest_checkpoint else None,
-        batch_size=20,
-        max_length=512,
-        temperature=2.0,
-        alpha=0.5,
-        distributed=distributed
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        temperature=args.temperature,
+        alpha=args.alpha,
+        distributed=distributed,
+        use_mac=args.use_mac
     )
 
-    num_epochs = 5  # <-- increase this to at least checkpoint epoch + 1
+    num_epochs = 5
     for epoch in range(trainer.start_epoch, num_epochs):
         loss = trainer.train_epoch(epoch)
-
+        
+        # Save checkpoint at end of epoch
         if trainer.is_main_process:
-            state_dict = trainer.student.module.state_dict() if distributed else trainer.student.state_dict()
-            checkpoint_path = checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'
-            torch.save({
-                'epoch': epoch,
-                'student_state_dict': state_dict,
-                'optimizer_state_dict': trainer.optimizer.state_dict(),
-                'scaler_state_dict': trainer.scaler.state_dict(),  # Always save scaler state
-                'loss': loss,
-            }, checkpoint_path)
-
+            trainer.save_checkpoint(epoch, loss)
+    
+    # Cleanup
     if trainer.is_main_process and trainer.writer is not None:
         trainer.writer.close()
-
+        wandb.finish()
+    
     cleanup()
 
 if __name__ == "__main__":
