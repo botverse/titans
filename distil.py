@@ -753,7 +753,7 @@ def main():
                        help="Temperature for distillation")
     parser.add_argument("--alpha", type=float, default=0.5,
                        help="Weighting factor for distillation loss")
-    parser.add_argument("--use-mac", action="store_true", default=True,
+    parser.add_argument("--use-mac", action="store_true", default=False, type=bool,
                        help="Use MAC module in student model")
     parser.add_argument("--resume", action="store_true", 
                        help="Resume from latest experiment instead of creating new one")
