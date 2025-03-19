@@ -30,6 +30,7 @@ class ModelArgs:
 class MACModule(nn.Module):
     def __init__(self, dim: int, num_persistent: int = 16, memory_size: int = 1024, alpha: float = 0.1):
         super().__init__()
+        self.dim = dim
         self.persistent_memory = nn.Parameter(torch.randn(num_persistent, dim) / math.sqrt(dim))  # (num_persistent, C)
         self.register_buffer("long_term_memory", torch.zeros(memory_size, dim))  # (M, C)
         self.mac_query = nn.Linear(dim, dim)
@@ -43,7 +44,7 @@ class MACModule(nn.Module):
             # Project segment mean to query space
             q = self.mac_query(segment_mean)  # (B, C)
             
-            # Calculate attention scores
+            # Calculate attention scores with temperature scaling
             attn_scores = torch.matmul(q, self.long_term_memory.T)  # (B, M)
             attn_scores = attn_scores / math.sqrt(self.dim)
             
