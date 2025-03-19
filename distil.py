@@ -151,10 +151,20 @@ class DistillationTrainer:
         temperature: float = 2.0,
         alpha: float = 0.5,
         distributed: bool = False,
-        use_mac: bool = True,  # Add MAC flag
+        use_mac: bool = True,
     ):
         self.exp_dir = exp_dir
         self.use_mac = use_mac
+        self.distributed = distributed
+        self.world_size = get_world_size()
+        
+        # Define is_main_process based on distributed setup
+        if distributed:
+            self.device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+            self.is_main_process = int(os.environ['LOCAL_RANK']) == 0
+        else:
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            self.is_main_process = True
         
         # Initialize wandb with experiment config
         if self.is_main_process:
@@ -173,16 +183,6 @@ class DistillationTrainer:
             
             # Initialize tensorboard writer with experiment directory
             self.writer = SummaryWriter(exp_dir / "tensorboard")
-        
-        self.distributed = distributed
-        self.world_size = get_world_size()
-        
-        if distributed:
-            self.device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-            self.is_main_process = int(os.environ['LOCAL_RANK']) == 0
-        else:
-            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-            self.is_main_process = True
         
         self.temperature = temperature
         self.alpha = alpha
