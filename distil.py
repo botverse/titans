@@ -208,34 +208,29 @@ class DistillationTrainer:
         self.teacher.gradient_checkpointing_enable()
         self.teacher.eval()
         
-        # Create the student model (with halved dimensions)
+        # Initialize student model based on use_mac flag
         config = copy.deepcopy(self.teacher.config)
-        config.hidden_size = config.hidden_size // 2
-        config.intermediate_size = config.intermediate_size // 2
-        config.num_attention_heads = config.num_attention_heads // 2
-        config.num_key_value_heads = config.num_key_value_heads // 2
-        config.num_hidden_layers = config.num_hidden_layers // 2
-        config.max_position_embeddings = config.max_position_embeddings // 2
-        config.rms_norm_eps = config.rms_norm_eps / 2
-        
-        # Modify student model initialization based on use_mac flag
+        config.hidden_size //= 2
+        config.intermediate_size //= 2
+        config.num_attention_heads //= 2
+        config.num_key_value_heads //= 2
+        config.num_hidden_layers //= 2
+        config.max_position_embeddings //= 2
+        config.rms_norm_eps /= 2
+
         if use_mac:
-            # Create the MAC module and add its configuration
             mac_config = {
                 "num_persistent": 16,
                 "memory_size": 1024,
                 "alpha": 0.1
             }
-            mac_module = MACModule(
-                dim=config.hidden_size,
-                **mac_config
-            )
+            mac_module = MACModule(dim=config.hidden_size, **mac_config)
             config.mac_module_config = mac_config
             config.architectures = ["MACTransformer"]
             config.model_type = "llama_mac"
             self.student = MACTransformer(config, mac_module)
         else:
-            # Use standard LlamaForCausalLM for non-MAC version
+            # Ensure no MAC module is initialized
             config.architectures = ["LlamaForCausalLM"]
             config.model_type = "llama"
             self.student = LlamaForCausalLM(config)
@@ -248,7 +243,7 @@ class DistillationTrainer:
                 json.dump(config.to_dict(), f, indent=2)
             print(f"Exported initial config to {config_path}")
         
-        # Initialize student model and explicitly move to device
+        # Move student model to device
         self.student = self.student.to(self.device)
         
         # Wrap student with DDP if in distributed mode
@@ -348,240 +343,83 @@ class DistillationTrainer:
         return {k: v.to(self.device) for k, v in encoded.items()}
 
     def compute_loss(self, teacher_logits, student_logits, input_ids):
-        """Compute distillation loss between teacher and student models"""
-        # Get the actual vocab size (for mixed-precision safety)
         vocab_size = student_logits.shape[-1]
-        
-        # Extract non-padding tokens
-        if self.tokenizer.pad_token_id is not None:
-            padding_mask = input_ids != self.tokenizer.pad_token_id
-        else:
-            padding_mask = torch.ones_like(input_ids, dtype=torch.bool)
-        
-        # Use only the logits for non-padding tokens in loss computation
-        teacher_logits_filtered = teacher_logits[padding_mask]
-        student_logits_filtered = student_logits[padding_mask]
-        labels_filtered = input_ids[padding_mask]
-        
-        # Compute KL divergence loss for distillation
-        # Scale logits by temperature for smoother probability distribution
+
+        # Shift logits and labels for causal LM
+        teacher_logits = teacher_logits[:, :-1, :].contiguous()  # (B, T-1, V)
+        student_logits = student_logits[:, :-1, :].contiguous()  # (B, T-1, V)
+        labels = input_ids[:, 1:].contiguous()  # (B, T-1)
+
+        # Create padding mask explicitly
+        padding_mask = labels != self.tokenizer.pad_token_id  # (B, T-1)
+
+        # Apply mask to logits and labels
+        teacher_logits_filtered = teacher_logits[padding_mask]  # (N, V)
+        student_logits_filtered = student_logits[padding_mask]  # (N, V)
+        labels_filtered = labels[padding_mask]  # (N,)
+
+        # Compute distillation loss (KL divergence)
         teacher_probs = F.softmax(teacher_logits_filtered / self.temperature, dim=-1)
         distil_loss = F.kl_div(
             F.log_softmax(student_logits_filtered / self.temperature, dim=-1),
             teacher_probs,
             reduction="batchmean"
         ) * (self.temperature ** 2)
-        
-        # Compute task loss (prediction of next token)
+
+        # Compute task loss (cross-entropy)
         task_loss = F.cross_entropy(
             student_logits_filtered.view(-1, vocab_size),
             labels_filtered.view(-1)
         )
-        
-        # Combine losses with weighting factor alpha
+
+        # Combine losses
         loss = self.alpha * distil_loss + (1 - self.alpha) * task_loss
-        
-        # Check for NaN values and log them rather than printing
-        if torch.isnan(loss):
-            if self.is_main_process:
-                wandb.log({
-                    "nan_loss/total": True,
-                    "nan_loss/distil": torch.isnan(distil_loss).item(),
-                    "nan_loss/task": torch.isnan(task_loss).item(),
-                    "debug/teacher_logits_max": teacher_logits_filtered.max().item(),
-                    "debug/teacher_logits_min": teacher_logits_filtered.min().item(),
-                    "debug/student_logits_max": student_logits_filtered.max().item(),
-                    "debug/student_logits_min": student_logits_filtered.min().item()
-                })
-        
+
         return loss, distil_loss, task_loss
 
     def train_epoch(self, epoch):
-        """Train for one epoch"""
         self.student.train()
         self.teacher.eval()
-        
-        # Add global step counter
-        global_step = epoch * len(self.dataloader)
-        checkpoint_every = 10000  # Save every 100 batches
-        
+
         if self.sampler:
             self.sampler.set_epoch(epoch)
-        
+
         total_loss = 0
-        total_distil_loss = 0
-        total_task_loss = 0
         num_batches = 0
-        nan_count = 0
-        
-        # Before the batch loop, initialize previous memory state
-        if self.distributed:
-            mac_module = self.student.module.mac_module
-        else:
-            mac_module = self.student.mac_module
-        # Check initial memory state
-        p_mem = mac_module.persistent_memory.cpu().detach().numpy()
-        l_mem = mac_module.long_term_memory.cpu().detach().numpy()
-        
-        # Log detailed memory statistics
-        wandb.log({
-            "initial/persistent_memory_min": float(np.min(p_mem)),
-            "initial/persistent_memory_max": float(np.max(p_mem)),
-            "initial/persistent_memory_mean": float(np.mean(p_mem)),
-            "initial/persistent_memory_std": float(np.std(p_mem)),
-            "initial/long_term_memory_min": float(np.min(l_mem)),
-            "initial/long_term_memory_max": float(np.max(l_mem)),
-            "initial/long_term_memory_mean": float(np.mean(l_mem)),
-            "initial/long_term_memory_std": float(np.std(l_mem)),
-        })
-        
 
-        previous_memory_state = mac_module.long_term_memory.clone().detach()
-        
-        # Add activation monitoring
-        activation_hooks = self.add_activation_monitoring()
-        try:
-            with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
-                for batch_idx, batch in enumerate(pbar):
-                    self.optimizer.zero_grad()
-                    
-                    inputs = self.prepare_batch(batch)
-                    
-                    # Teacher forward pass (no gradients needed)
-                    with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
-                        teacher_outputs = self.teacher(**inputs)
-                        teacher_logits = teacher_outputs.logits
-                    
-                    # Student forward pass and backward pass (must be in same AMP context)
-                    with torch.amp.autocast("cuda"):
-                        student_outputs = self.student(
-                            tokens=inputs["input_ids"],
-                            use_mac=True
-                        )
+        with tqdm(self.dataloader, desc=f"Epoch {epoch}", disable=not self.is_main_process) as pbar:
+            for batch_idx, batch in enumerate(pbar):
+                self.optimizer.zero_grad()
+                inputs = self.prepare_batch(batch)
 
-                        loss, distil_loss, task_loss = self.compute_loss(
-                            teacher_logits,
-                            student_outputs,
-                            inputs["input_ids"]
-                        )
-                    
-                    # Scale the loss and backpropagate with AMP
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                    
-                    # Log NaN detection (but don't change training behavior)
-                    if torch.isnan(loss):
-                        nan_count += 1
-                        if self.is_main_process:
-                            print(f"WARNING: NaN detected in loss at batch {batch_idx}")
-                            wandb.log({"nan_detected": batch_idx})
-                    
-                    total_loss += loss.item() if not torch.isnan(loss) else 0
-                    total_distil_loss += distil_loss.item() if not torch.isnan(distil_loss) else 0
-                    total_task_loss += task_loss.item() if not torch.isnan(task_loss) else 0
-                    num_batches += 1
-                    
-                    global_step += 1
-                    
-                    # Save checkpoint periodically within epoch
-                    if self.is_main_process and (batch_idx + 1) % checkpoint_every == 0:
-                        state_dict = self.student.module.state_dict() if self.distributed else self.student.state_dict()
-                        checkpoint_path = self.exp_dir / "checkpoints" / f'checkpoint_epoch_{epoch}_batch_{batch_idx}.pt'
-                        torch.save({
-                            'epoch': epoch,
-                            'batch_idx': batch_idx,
-                            'global_step': global_step,
-                            'student_state_dict': state_dict,
-                            'optimizer_state_dict': self.optimizer.state_dict(),
-                            'scaler_state_dict': self.scaler.state_dict(),  # Always save scaler state
-                            'loss': loss.item() if not torch.isnan(loss) else float('nan'),
-                        }, checkpoint_path)
-                    
-                    if self.is_main_process:
-                        # Log standard metrics (safely handling NaNs)
-                        metrics = {
-                            "batch_loss": loss.item() if not torch.isnan(loss) else -1,
-                            "batch_distil_loss": distil_loss.item() if not torch.isnan(distil_loss) else -1,
-                            "batch_task_loss": task_loss.item() if not torch.isnan(task_loss) else -1,
-                        }
-                        wandb.log(metrics)
-                        
-                        pbar.set_postfix({
-                            'loss': loss.item() if not torch.isnan(loss) else float('nan'),
-                            'distil_loss': distil_loss.item() if not torch.isnan(distil_loss) else float('nan'),
-                            'task_loss': task_loss.item() if not torch.isnan(task_loss) else float('nan')
-                        })
+                with torch.no_grad(), torch.amp.autocast(device_type='cuda'):
+                    teacher_outputs = self.teacher(**inputs)
+                    teacher_logits = teacher_outputs.logits
 
-                        # Monitor memory stats - skip histograms if there are NaNs
-                        p_mem = mac_module.persistent_memory.cpu().detach().numpy() 
-                        l_mem = mac_module.long_term_memory.cpu().detach().numpy()
-                        
-                        # Detect NaNs in memory
-                        has_nan_persistent = np.isnan(p_mem).any()
-                        has_nan_longterm = np.isnan(l_mem).any()
-                        
-                        if has_nan_persistent or has_nan_longterm:
-                            wandb.log({
-                                "MAC/has_nan_persistent": has_nan_persistent,
-                                "MAC/has_nan_longterm": has_nan_longterm
-                            })
-                            
-                        # Log basic memory statistics
-                        memory_metrics = {}
-                        
-                        # Memory update magnitude
-                        if not has_nan_longterm and not np.isnan(previous_memory_state.cpu().numpy()).any():
-                            memory_update_magnitude = torch.norm(mac_module.long_term_memory - previous_memory_state).item()
-                            memory_metrics["MAC/memory_update_magnitude"] = memory_update_magnitude
-                        
-                        # Basic stats instead of histograms
-                        if not has_nan_persistent:
-                            memory_metrics.update({
-                                "MAC/persistent_memory_min": float(np.min(p_mem)),
-                                "MAC/persistent_memory_max": float(np.max(p_mem)),
-                                "MAC/persistent_memory_mean": float(np.mean(p_mem)),
-                                "MAC/persistent_memory_std": float(np.std(p_mem))
-                            })
-                        
-                        if not has_nan_longterm:
-                            memory_metrics.update({
-                                "MAC/long_term_memory_min": float(np.min(l_mem)),
-                                "MAC/long_term_memory_max": float(np.max(l_mem)),
-                                "MAC/long_term_memory_mean": float(np.mean(l_mem)),
-                                "MAC/long_term_memory_std": float(np.std(l_mem))
-                            })
-                        
-                        wandb.log(memory_metrics)
-                        
-                        # Only update previous memory state if it doesn't have NaNs
-                        if not has_nan_longterm:
-                            previous_memory_state = mac_module.long_term_memory.clone().detach()
+                with torch.amp.autocast("cuda"):
+                    if self.use_mac:
+                        student_outputs = self.student(tokens=inputs["input_ids"], use_mac=True)
+                    else:
+                        student_outputs = self.student(**inputs).logits  # <-- standard forward pass without MAC
 
-                        # Log activation stats
-                        self.log_activation_stats()
-                
-            if self.is_main_process:
-                # Compute safe averages
-                avg_loss = total_loss / max(num_batches, 1)  # Avoid division by zero
-                avg_distil_loss = total_distil_loss / max(num_batches, 1)
-                avg_task_loss = total_task_loss / max(num_batches, 1)
-                
-                # Log epoch stats
-                wandb.log({
-                    "epoch": epoch,
-                    "avg_loss": avg_loss,
-                    "avg_distil_loss": avg_distil_loss,
-                    "avg_task_loss": avg_task_loss,
-                    "learning_rate": self.optimizer.param_groups[0]['lr'],
-                    "nan_count": nan_count
-                })
-            
-            return total_loss / max(num_batches, 1)  # Avoid division by zero
-        finally:
-            # Remove hooks after epoch
-            for hook in activation_hooks:
-                hook.remove()
+                    loss, distil_loss, task_loss = self.compute_loss(
+                        teacher_logits,
+                        student_outputs,
+                        inputs["input_ids"]
+                    )
+
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+                total_loss += loss.item()
+                num_batches += 1
+
+                if self.is_main_process:
+                    pbar.set_postfix({'loss': loss.item()})
+
+        avg_loss = total_loss / max(num_batches, 1)
+        return avg_loss
 
     def load_checkpoint(self, checkpoint_path):
         """Load checkpoint safely"""
@@ -744,28 +582,30 @@ class DistillationTrainer:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--teacher-model-id", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct",
-                       help="Path to the teacher model")
+                        help="Path to the teacher model")
     parser.add_argument("--batch-size", type=int, default=8,
-                       help="Batch size for training")
+                        help="Batch size for training")
     parser.add_argument("--max-length", type=int, default=256,
-                       help="Maximum sequence length for input")
+                        help="Maximum sequence length for input")
     parser.add_argument("--temperature", type=float, default=2.0,
-                       help="Temperature for distillation")
+                        help="Temperature for distillation")
     parser.add_argument("--alpha", type=float, default=0.5,
-                       help="Weighting factor for distillation loss")
-    parser.add_argument("--use-mac", action="store_true", default=False, type=bool,
-                       help="Use MAC module in student model")
-    parser.add_argument("--resume", action="store_true", 
-                       help="Resume from latest experiment instead of creating new one")
-    
+                        help="Weighting factor for distillation loss")
+    parser.add_argument("--use-mac", action="store_true", default=False,
+                        help="Use MAC module in student model")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume from latest experiment instead of creating new one")
+    parser.add_argument("--num-epochs", type=int, default=5,
+                        help="Number of epochs to train")
+
     args = parser.parse_args()
-    
+
     # Setup distributed training
     distributed = setup_distributed()
-    
+
     # Setup experiment directory and save config
     exp_dir = setup_experiment(args)
-    
+
     # Find latest checkpoint
     latest_checkpoint = None
     checkpoints_dir = exp_dir / "checkpoints"
@@ -774,7 +614,7 @@ def main():
         if checkpoints:
             latest_checkpoint = checkpoints[-1]
             print(f"Found checkpoint: {latest_checkpoint}")
-    
+
     trainer = DistillationTrainer(
         teacher_model_id=args.teacher_model_id,
         exp_dir=exp_dir,
@@ -787,19 +627,18 @@ def main():
         use_mac=args.use_mac
     )
 
-    num_epochs = 5
-    for epoch in range(trainer.start_epoch, num_epochs):
+    for epoch in range(trainer.start_epoch, args.num_epochs):
         loss = trainer.train_epoch(epoch)
-        
+
         # Save checkpoint at end of epoch
         if trainer.is_main_process:
             trainer.save_checkpoint(epoch, loss)
-    
+
     # Cleanup
     if trainer.is_main_process and trainer.writer is not None:
         trainer.writer.close()
         wandb.finish()
-    
+
     cleanup()
 
 if __name__ == "__main__":

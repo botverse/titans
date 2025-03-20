@@ -12,9 +12,42 @@ from vllm import LLM, SamplingParams
 from models.vllm_mac_model import MACLlamaForCausalLM
 import json
 
+def find_latest_run():
+    """Find the most recent experiment directory"""
+    runs_dir = Path("runs")
+    if not runs_dir.exists():
+        return None
+    
+    # Find all experiment directories
+    experiments = [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith("distil_")]
+    if not experiments:
+        return None
+    
+    # Sort by creation time and return the latest
+    return max(experiments, key=lambda x: x.stat().st_mtime)
+
+def get_model_path(args):
+    """Get model path from arguments, handling both direct paths and run directories"""
+    if args.run:
+        # Use specified run directory
+        run_dir = Path("runs") / args.run
+    else:
+        # Find latest run
+        run_dir = find_latest_run()
+        if run_dir is None:
+            # If no run found and model_path specified, use it directly
+            if args.model_path:
+                return Path(args.model_path)
+            raise ValueError("No experiment runs found in runs directory")
+    
+    # Determine model directory name based on MAC usage
+    model_dir = "vllm_mac_model" if args.use_mac else "vllm_llama_model"
+    return run_dir / model_dir
+
 def main():
     parser = argparse.ArgumentParser(description="Run inference with vLLM")
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the model directory")
+    parser.add_argument("--model_path", type=str, help="Direct path to the model directory")
+    parser.add_argument("--run", type=str, help="Run directory name (defaults to latest)")
     parser.add_argument("--prompt", type=str, default="What is machine learning?", help="Prompt for inference")
     parser.add_argument("--max_tokens", type=int, default=512, help="Maximum tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
@@ -28,6 +61,14 @@ def main():
         help="Enable memory efficient settings"
     )
     args = parser.parse_args()
+    
+    # Get the actual model path
+    model_path = get_model_path(args)
+    if not model_path.exists():
+        raise ValueError(f"Model directory not found at {model_path}")
+    
+    # Update args.model_path for the rest of the code
+    args.model_path = str(model_path)
     
     # Set up vLLM sampling parameters
     sampling_params = SamplingParams(

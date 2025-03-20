@@ -9,17 +9,68 @@ import dotenv
 
 dotenv.load_dotenv()
 
-def export_model_to_hf_format(checkpoint_path, output_dir, config_path=None):
+def find_latest_run():
+    """Find the most recent experiment directory"""
+    runs_dir = Path("runs")
+    if not runs_dir.exists():
+        return None
+    
+    # Find all experiment directories
+    experiments = [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith("distil_")]
+    if not experiments:
+        return None
+    
+    # Sort by creation time and return the latest
+    return max(experiments, key=lambda x: x.stat().st_mtime)
+
+def find_latest_checkpoint(run_dir):
+    """Find the latest checkpoint in a run directory"""
+    checkpoint_dir = run_dir / "checkpoints"
+    if not checkpoint_dir.exists():
+        return None
+    
+    # Find all checkpoint files
+    checkpoints = [f for f in checkpoint_dir.glob("checkpoint_epoch_*.pt")]
+    if not checkpoints:
+        return None
+    
+    # Sort by epoch number and return the latest
+    return max(checkpoints, key=lambda x: int(x.stem.split('_')[-1]))
+
+def export_model_to_hf_format(run_dir=None, checkpoint_file=None, config_path=None):
     """
     Export the trained model to a HuggingFace compatible format
     """
-    # Create output directory
-    output_dir = Path(output_dir)
+    # Find latest run if not specified
+    if run_dir is None:
+        run_dir = find_latest_run()
+        if run_dir is None:
+            raise ValueError("No experiment runs found in runs directory")
+    else:
+        run_dir = Path(run_dir)
+        if not run_dir.exists():
+            raise ValueError(f"Run directory {run_dir} does not exist")
+    
+    # Find latest checkpoint if not specified
+    if checkpoint_file is None:
+        checkpoint_file = find_latest_checkpoint(run_dir)
+        if checkpoint_file is None:
+            raise ValueError(f"No checkpoints found in {run_dir}/checkpoints")
+    else:
+        checkpoint_file = run_dir / "checkpoints" / checkpoint_file
+        if not checkpoint_file.exists():
+            raise ValueError(f"Checkpoint file {checkpoint_file} does not exist")
+
+    # Set output directory within the run directory
+    output_dir = run_dir / "vllm_mac_model"
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    print(f"Exporting model from {checkpoint_file} to HuggingFace format")
+    print(f"Output directory: {output_dir}")
+    
     # Load checkpoint
-    print(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    print(f"Loading checkpoint from {checkpoint_file}")
+    checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
     
     # Extract model state dict
     state_dict = checkpoint['student_state_dict']
@@ -58,7 +109,7 @@ def export_model_to_hf_format(checkpoint_path, output_dir, config_path=None):
     # Try to find config file if not provided
     if config_path is None:
         # Look in checkpoint directory first
-        checkpoint_dir = Path(checkpoint_path).parent
+        checkpoint_dir = Path(checkpoint_file).parent
         config_path = checkpoint_dir / "initial_config.json"
         if not config_path.exists():
             raise ValueError("No config file found. Please specify with --config_path")
@@ -100,9 +151,13 @@ def export_model_to_hf_format(checkpoint_path, output_dir, config_path=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export distilled model to HuggingFace format")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the checkpoint file")
-    parser.add_argument("--output_dir", type=str, default="vllm_mac_model", help="Directory to save the exported model")
-    parser.add_argument("--config_path", type=str, default=None, help="Path to the model config file (defaults to initial_config.json in checkpoint dir)")
+    parser.add_argument("--run", type=str, help="Run directory name (defaults to latest)")
+    parser.add_argument("--checkpoint", type=str, help="Checkpoint file name (defaults to latest)")
+    parser.add_argument("--config_path", type=str, help="Path to the model config file (defaults to initial_config.json in checkpoint dir)")
     
     args = parser.parse_args()
-    export_model_to_hf_format(args.checkpoint, args.output_dir, args.config_path) 
+    
+    # Convert paths if provided
+    run_dir = Path("runs") / args.run if args.run else None
+    
+    export_model_to_hf_format(run_dir, args.checkpoint, args.config_path) 

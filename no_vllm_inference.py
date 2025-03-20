@@ -7,7 +7,20 @@ import argparse
 # Import your model classes
 from models.llama_titans import MACTransformer, MACModule
 
-def run_inference(model_path, prompts, max_new_tokens=100, use_mac=False):
+def safe_logits_processor(logits):
+    """Process logits safely to prevent numerical instability"""
+    # Replace inf and -inf
+    logits = torch.nan_to_num(logits, nan=0.0, posinf=1e4, neginf=-1e4)
+    
+    # Clamp values
+    logits = torch.clamp(logits, min=-1e4, max=1e4)
+    
+    # Apply softmax with better numerical stability
+    logits = logits - logits.max(dim=-1, keepdim=True)[0]
+    
+    return logits
+
+def run_inference(model_path, prompts, max_new_tokens=64, use_mac=False):
     """Run basic inference without vLLM"""
     # Load config
     model_path = Path(model_path)
@@ -47,69 +60,121 @@ def run_inference(model_path, prompts, max_new_tokens=100, use_mac=False):
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token = tokenizer.eos_token
+    
+    # Add model inspection before inference
+    print("\nModel structure check:")
+    for name, param in model.named_parameters():
+        print(f"{name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+    
+    # Add generation config inspection
+    generation_config = {
+        "max_new_tokens": 64,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "top_k": 50,
+        "do_sample": True,
+        "repetition_penalty": 1.1,
+        "num_beams": 1,
+        "pad_token_id": tokenizer.pad_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "use_cache": True
+    }
+    print("\nGeneration config:", generation_config)
     
     results = []
     for prompt in prompts:
-        # Tokenize
-        formatted_prompt = f"<s>[INST] {prompt} [/INST]"  # Use proper Llama3 format
+        formatted_prompt = f"<s>[INST] {prompt} [/INST]"
         inputs = tokenizer(
             formatted_prompt,
             return_tensors="pt",
             padding=True,
             truncation=True,
-            max_length=256  # Much longer than 8!
+            max_length=256
         ).to(device)
         
-        # Generate with detailed tensor shape logging
-        print(f"\nProcessing prompt: {prompt}")
-        print(f"Input shape: {inputs.input_ids.shape}")  # (B, T)
+        # Explicitly create attention mask to avoid ambiguity
+        attention_mask = inputs['attention_mask']
         
         with torch.inference_mode():
-            if use_mac:
-                # Generate text with MAC model
-                output_ids = model.generate(
-                    tokens=inputs.input_ids,  # MAC model expects 'tokens'
-                    max_new_tokens=64,
-                    temperature=0.1,
-                    top_p=0.9,
-                    do_sample=True,
-                    repetition_penalty=1.2,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    use_mac=True  # Enable MAC functionality
-                )
-            else:
-                # Standard generation
-                output_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=64,
-                    temperature=0.1,
-                    top_p=0.9,
-                    do_sample=True,
-                    repetition_penalty=1.2,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id
-                )
+            output_ids = model.generate(
+                inputs.input_ids,
+                attention_mask=attention_mask,  # explicitly pass attention mask
+                max_new_tokens=generation_config["max_new_tokens"],
+                do_sample=generation_config["do_sample"],
+                temperature=generation_config["temperature"],
+                top_p=generation_config["top_p"],
+                top_k=generation_config["top_k"],
+                repetition_penalty=generation_config["repetition_penalty"],
+                pad_token_id=generation_config["pad_token_id"],
+                eos_token_id=generation_config["eos_token_id"],
+                use_cache=True
+            )
             
-            # Decode the generated text
+            # Print intermediate logits for debugging
+            with torch.no_grad():
+                logits = model(inputs.input_ids).logits
+                print(f"Output logits shape: {logits.shape}")
+                print(f"Logits stats - mean: {logits.mean().item():.6f}, std: {logits.std().item():.6f}")
+                
+                # Check top predictions
+                last_logits = logits[0, -1]
+                top_tokens = torch.topk(last_logits, k=5)
+                print("\nTop 5 predictions for next token:")
+                for score, token_id in zip(top_tokens.values, top_tokens.indices):
+                    token = tokenizer.convert_ids_to_tokens([token_id])[0]
+                    print(f"Token: {token}, Score: {score.item():.6f}")
+            
             generated_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-            print(f"Generated: {generated_text}")
+            print(f"Prompt: {prompt}\nGenerated: {generated_text}\n")
             results.append((prompt, generated_text))
     
     return results
 
+def find_latest_run():
+    """Find the most recent experiment directory"""
+    runs_dir = Path("runs")
+    if not runs_dir.exists():
+        return None
+    
+    # Find all experiment directories
+    experiments = [d for d in runs_dir.iterdir() if d.is_dir() and d.name.startswith("distil_")]
+    if not experiments:
+        return None
+    
+    # Sort by creation time and return the latest
+    return max(experiments, key=lambda x: x.stat().st_mtime)
+
+def get_model_path(args):
+    """Get model path from arguments, handling both direct paths and run directories"""
+    if args.run:
+        # Use specified run directory
+        run_dir = Path("runs") / args.run
+    else:
+        # Find latest run
+        run_dir = find_latest_run()
+        if run_dir is None:
+            # If no run found and model_path specified, use it directly
+            if args.model_path:
+                return Path(args.model_path)
+            raise ValueError("No experiment runs found in runs directory")
+    
+    # Determine model directory name based on MAC usage
+    model_dir = "vllm_mac_model" if args.use_mac else "vllm_llama_model"
+    return run_dir / model_dir
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run basic inference on distilled model")
     parser.add_argument("--use_mac", action="store_true", help="Use MAC-enhanced model")
-    parser.add_argument("--model_path", type=str, help="Path to the model directory")
+    parser.add_argument("--model_path", type=str, help="Direct path to the model directory")
+    parser.add_argument("--run", type=str, help="Run directory name (defaults to latest)")
     parser.add_argument("--max_tokens", type=int, default=100, help="Maximum tokens to generate")
     args = parser.parse_args()
     
-    # Set default model path based on --use_mac if not explicitly provided
-    if args.model_path is None:
-        args.model_path = "vllm_mac_model" if args.use_mac else "vllm_model"
+    # Get the actual model path
+    model_path = get_model_path(args)
+    if not model_path.exists():
+        raise ValueError(f"Model directory not found at {model_path}")
     
     prompts = [
         "what's the capital of france?",
@@ -117,4 +182,4 @@ if __name__ == "__main__":
         "what's the capital of japan?"
     ]
     
-    run_inference(args.model_path, prompts, args.max_tokens, args.use_mac)
+    run_inference(model_path, prompts, args.max_tokens, args.use_mac)
