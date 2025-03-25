@@ -75,36 +75,8 @@ def export_model_to_hf_format(run_dir=None, checkpoint_file=None, config_path=No
     # Extract model state dict
     state_dict = checkpoint['student_state_dict']
     
-    # Separate the state dict by component for easier handling
-    llama_state_dict = {}
-    mac_state_dict = {}
-    lm_head_state_dict = {}
-    
-    for key, value in state_dict.items():
-        # Direct key mapping without prefixes
-        if key.startswith('llama.'):
-            new_key = key.replace('llama.', '', 1)
-            llama_state_dict[new_key] = value
-        elif key.startswith('mac_module.'):
-            mac_state_dict[key] = value
-        elif key.startswith('lm_head.'):
-            lm_head_state_dict[key] = value
-    
-    # Combine all components
-    combined_state_dict = {}
-    combined_state_dict.update(llama_state_dict)
-    combined_state_dict.update(mac_state_dict)
-    combined_state_dict.update(lm_head_state_dict)
-    
-    # Validate key structure
-    print("Validating exported keys:")
-    expected_prefixes = {'model.', 'mac_module.', 'lm_head.'}
-    for key in combined_state_dict:
-        if not any(key.startswith(p) for p in expected_prefixes):
-            print(f"Unexpected key prefix: {key}")
-    
     # Save the transformed state dict
-    torch.save(combined_state_dict, output_dir / "pytorch_model.bin")
+    torch.save(state_dict, output_dir / "pytorch_model.bin")
     
     # Try to find config file if not provided
     if config_path is None:

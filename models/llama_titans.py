@@ -114,7 +114,7 @@ class MACTransformer(nn.Module):
         if outputs.hidden_states:
             self.mac_module.update(outputs.hidden_states[-1][:, p_mem.shape[1]+1:, :].detach())
         
-        return outputs.logits[:, p_mem.shape[1]+1:, :]  # (B, T, V)
+        return outputs # (B, T, V)
 
     def generate(
         self,
@@ -152,9 +152,11 @@ class MACTransformer(nn.Module):
             for _ in range(max_new_tokens):
                 # Forward pass with MAC
                 outputs = self.forward(
-                    tokens=generated_tokens[:, -1024:],  # Limit context window
+                    tokens=generated_tokens[:, -seq_length:],  # Limit context window
                     use_mac=use_mac
                 )
+                num_persistent = self.mac_module.persistent_memory.shape[0]  # (P)
+                outputs = outputs.logits[:, num_persistent+1:, :]
                 
                 # Get logits for next token
                 next_token_logits = outputs[:, -1, :]

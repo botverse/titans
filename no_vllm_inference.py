@@ -20,7 +20,7 @@ def safe_logits_processor(logits):
     
     return logits
 
-def run_inference(model_path, prompts, max_new_tokens=64, use_mac=False):
+def run_inference(model_path, prompts, use_mac=False):
     """Run basic inference without vLLM"""
     # Load config
     model_path = Path(model_path)
@@ -32,14 +32,23 @@ def run_inference(model_path, prompts, max_new_tokens=64, use_mac=False):
             config_dict = json.load(f)
         config = LlamaConfig.from_dict(config_dict)
         
+        state_dict = torch.load(
+            model_path / "pytorch_model.bin",
+            map_location="cpu",
+            weights_only=True  # Important: reduce memory usage during loading
+        )
+
         # Initialize MAC module
         mac_module = MACModule(
             dim=config.hidden_size,
             **config.mac_module_config
         )
-        
+    
+
         # Initialize model with MAC
         model = MACTransformer(config=config, mac_module=mac_module)
+        model.load_state_dict(state_dict)
+
         model = model.to(torch.float16)  # Use half precision
         model = model.to("cuda" if torch.cuda.is_available() else "cpu")
     else:
@@ -62,10 +71,10 @@ def run_inference(model_path, prompts, max_new_tokens=64, use_mac=False):
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
     
-    # Add model inspection before inference
-    print("\nModel structure check:")
-    for name, param in model.named_parameters():
-        print(f"{name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+    # # Add model inspection before inference
+    # print("\nModel structure check:")
+    # for name, param in model.named_parameters():
+    #     print(f"{name}: shape={param.shape}, mean={param.mean().item():.6f}, std={param.std().item():.6f}")
     
     # Add generation config inspection
     generation_config = {
@@ -84,7 +93,8 @@ def run_inference(model_path, prompts, max_new_tokens=64, use_mac=False):
     
     results = []
     for prompt in prompts:
-        formatted_prompt = f"<s>[INST] {prompt} [/INST]"
+        # Directly use the fully formatted prompt (including system message)
+        formatted_prompt = prompt  # Removed additional wrapping
         inputs = tokenizer(
             formatted_prompt,
             return_tensors="pt",
@@ -168,7 +178,6 @@ if __name__ == "__main__":
     parser.add_argument("--use_mac", action="store_true", help="Use MAC-enhanced model")
     parser.add_argument("--model_path", type=str, help="Direct path to the model directory")
     parser.add_argument("--run", type=str, help="Run directory name (defaults to latest)")
-    parser.add_argument("--max_tokens", type=int, default=100, help="Maximum tokens to generate")
     args = parser.parse_args()
     
     # Get the actual model path
@@ -176,10 +185,22 @@ if __name__ == "__main__":
     if not model_path.exists():
         raise ValueError(f"Model directory not found at {model_path}")
     
+    # Updated prompts matching the JSON object structure from training:
     prompts = [
-        "what's the capital of france?",
-        "what's the capital of germany?",
-        "what's the capital of japan?"
+        '{"conversations": ['
+        '{"from": "system", "value": "You are an AI assistant that follows instructions extremely well. Help as much as you can.", "weight": null},'
+        '{"from": "human", "value": "What is the capital of France?", "weight": 0.0},'
+        '{"from": "gpt", "value": "',
+
+        '{"conversations": ['
+        '{"from": "system", "value": "You are an AI assistant that follows instructions extremely well. Help as much as you can.", "weight": null},'
+        '{"from": "human", "value": "What is the capital of Germany?", "weight": 0.0},'
+        '{"from": "gpt", "value": "',
+
+        '{"conversations": ['
+        '{"from": "system", "value": "You are an AI assistant that follows instructions extremely well. Help as much as you can.", "weight": null},'
+        '{"from": "human", "value": "What is the capital of Japan?", "weight": 0.0},'
+        '{"from": "gpt", "value": "'
     ]
     
-    run_inference(model_path, prompts, args.max_tokens, args.use_mac)
+    run_inference(model_path, prompts, args.use_mac)

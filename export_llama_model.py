@@ -90,6 +90,8 @@ def convert_to_vllm_compatible(run_dir=None, checkpoint_file=None, config_path=N
     # Extract state dict
     state_dict = checkpoint['student_state_dict']
     
+    translation_table = {}
+
     # Transform the state dict to match HuggingFace Llama format
     new_state_dict = {}
     for key, value in state_dict.items():
@@ -103,12 +105,10 @@ def convert_to_vllm_compatible(run_dir=None, checkpoint_file=None, config_path=N
         # Correctly handle the double 'model.model.' prefix
         if key.startswith('model.model.'):
             new_key = 'model.' + key[len('model.model.'):]  # remove extra 'model.' prefix
-        elif key.startswith('model.'):
-            new_key = key  # already correct
         elif key.startswith('llama.'):
             new_key = f"{key[len('llama.'):]}"
         else:
-            new_key = f"model.{key}"
+            new_key = key
 
         # Handle layer norm weights properly
         if any(x in new_key.lower() for x in ['layernorm', 'norm']):
@@ -123,13 +123,22 @@ def convert_to_vllm_compatible(run_dir=None, checkpoint_file=None, config_path=N
             print(f"Warning: NaN values found in {key}, replacing with ones")
             value = torch.ones_like(value)
             
+        translation_table[key] = new_key
         new_state_dict[new_key] = value
 
-    # Ensure lm_head is properly handled
-    if 'model.embed_tokens.weight' in new_state_dict and 'lm_head.weight' not in new_state_dict:
-        print("Creating lm_head.weight from embedding weights")
-        new_state_dict['lm_head.weight'] = new_state_dict['model.embed_tokens.weight'].clone()
+    # Ensure vocab_size and hidden_size match the actual weights
+    embed_weight = state_dict["model.embed_tokens.weight"]
+    config_data["vocab_size"] = embed_weight.shape[0]  # e.g., 128256
+    config_data["hidden_size"] = embed_weight.shape[1]  # e.g., 2048
 
+    # Save the corrected config.json explicitly
+    with open(output_dir / "config.json", "w") as f:
+        json.dump(config_data, f, indent=2)
+
+    print("Translation table:")
+    for key, value in translation_table.items():
+        print(f"{key} -> {value}")
+    
     # Verify key structure
     print("\nVerifying state dict keys:")
     for key in sorted(new_state_dict.keys()):
