@@ -5,6 +5,7 @@ import torch
 from pathlib import Path
 from transformers import AutoTokenizer # Keep tokenizer loading
 import argparse
+import hashlib
 
 # Assuming your custom code is in the 'models' directory relative to this script
 MODELS_CODE_DIR = Path("models")
@@ -12,6 +13,20 @@ MODELS_CODE_DIR = Path("models")
 DEFAULT_HF_CACHE = Path(".huggingface/hub")
 DEFAULT_MODEL_NAME = "models--meta-llama--Meta-Llama-3-8B-Instruct"
 DEFAULT_SNAPSHOT = "5f0b02c75b57c5855da9ae460ce51323ea669d8a"
+
+def get_file_hash(file_path: Path) -> str:
+    """Calculate SHA-256 hash of a file."""
+    sha256_hash = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(4096), b""):
+            sha256_hash.update(byte_block)
+    return sha256_hash.hexdigest()
+
+def should_copy_file(src: Path, dest: Path) -> bool:
+    """Check if file should be copied based on existence and hash comparison."""
+    if not dest.exists():
+        return True
+    return get_file_hash(src) != get_file_hash(dest)
 
 def package_base_model_with_wrapper(
     output_dir: str,
@@ -155,26 +170,33 @@ def package_base_model_with_wrapper(
                 f"Could not find model weight files (.safetensors and index.json, or pytorch_model.bin) in {base_model_path}"
             )
 
-    # Copy weight files
+    # Copy weight files only if changed
     for file_path in model_files:
-        # Resolve symlink and copy the actual file content
+        dest_path = output_dir / file_path.name
         try:
-            shutil.copy2(file_path.resolve(strict=True), output_dir / file_path.name)
-            print(f"  - Copied {file_path.name}")
+            if should_copy_file(file_path.resolve(strict=True), dest_path):
+                shutil.copy2(file_path.resolve(strict=True), dest_path)
+                print(f"  - Copied {file_path.name} (file changed)")
+            else:
+                print(f"  - Skipped {file_path.name} (no changes)")
         except FileNotFoundError:
             print(f"Warning: Could not resolve symlink or copy weight file: {file_path}")
         except Exception as e:
             print(f"Warning: Error copying {file_path.name}: {e}")
 
-    # Copy the index file if it exists (for safetensors)
+    # Copy the index file if it exists (for safetensors) and has changed
     if index_file and index_file.exists():
+        dest_index = output_dir / index_file.name
         try:
-            shutil.copy2(index_file.resolve(strict=True), output_dir / index_file.name) # Resolve symlink
-            print(f"  - Copied {index_file.name}")
+            if should_copy_file(index_file.resolve(strict=True), dest_index):
+                shutil.copy2(index_file.resolve(strict=True), dest_index)
+                print(f"  - Copied {index_file.name} (file changed)")
+            else:
+                print(f"  - Skipped {index_file.name} (no changes)")
         except FileNotFoundError:
              print(f"Warning: Could not resolve symlink for index file: {index_file}")
         except Exception as e:
-             print(f"Warning: Error copying {index_file.name}: {e}")
+            print(f"Warning: Error copying {index_file.name}: {e}")
 
 
     # --- 6. Create README.md (optional but recommended) ---
