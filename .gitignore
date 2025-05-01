@@ -9,4 +9,6 @@ vllm_mac_model/
 checkpoints/
 wandb/
 vllm_mac_model*/
+vllm_model.specstory
 vllm_model
+.specstory
