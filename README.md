@@ -1,4 +1,6 @@
-# ⚠️ Disclaimer: Experimental Titans Paper Implementation ⚠️
+# Titans Paper Implementation
+
+** ⚠️ Disclaimer: Experimental ⚠️ **
 
 **This repository is an *experimental* and *unofficial* implementation of ideas from the [TITANS paper](https://arxiv.org/abs/2402.19429) and related memory-augmented transformer research.**
 - It is **not** an official release, nor is it guaranteed to match the results or architecture of the original paper.
